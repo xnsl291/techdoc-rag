@@ -1,0 +1,35 @@
+# 설정값은 코드에 하드코딩하지 않는다.
+#
+# [미확정, 시작점] 표시가 붙은 값은 실측이나 실험으로 정해지지 않은 임시값이다.
+# 성과 판정에 쓰지 않으며, Step 8 파라미터 실험 후 교체한다.
+#
+# 엔드포인트와 API 키는 이 파일이 아니라 .env에서 읽는다. 이 파일은 커밋되고 .env는 안 된다.
+
+llm:
+  # 2026-08-22 실측: 이 장비에서 100% CPU로 동작하며 iGPU 가속은 붙지 않는다.
+  model_name: "qwen3.5:4b-q4_K_M"
+  temperature: 0.0
+  # Qwen3.5는 thinking이 기본 ON이고 지연을 배 단위로 바꾼다.
+  thinking_enabled: false
+  runtime_context_tokens: 8192      # [미확정, 시작점]
+  generation_max_tokens: 512        # [미확정, 시작점] 허용 응답시간이 정해지면 역산한다
+
+embedding:
+  model_name: ""                    # [미확정] 평가셋 확보 후 후보를 비교해 결정한다
+
+chunking:
+  size_tokens: 512                  # [미확정, 시작점]
+  overlap_tokens: 64                # [미확정, 시작점]
+  config_version: "v1"              # 설정이 바뀌면 올린다. 재색인 판단 근거가 된다
+
+retrieval:
+  top_k: 5                          # [미확정, 시작점]
+  similarity_threshold: 0.0         # [미확정, 시작점] 0이면 임계값 적용 안 함
+
+prompt:
+  version: "v1"                     # 답변 재현성 추적용
+
+storage:
+  document_root: "data/documents"
+  metadata_database_path: "data/metadata.db"
+  qdrant_collection_alias: "techdoc"
