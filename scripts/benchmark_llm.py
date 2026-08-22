@@ -102,33 +102,37 @@ class OllamaHttpClient:
     애플리케이션의 LlmClient 어댑터도 같은 이유로 연결을 재사용해야 한다.
     """
 
-    # 이 장비에서 Windows 동적 포트 범위(49152~65535)가 TIME_WAIT 소켓으로
-    # 고갈되어 있어, 커널이 출발지 포트를 자동 할당하면 connect가 WinError 10048로 실패한다.
-    # 동적 범위 밖의 포트를 출발지로 직접 지정해 이 문제를 우회한다.
-    # 장비를 재시작하면 TIME_WAIT가 정리되므로 그때는 필요 없는 우회다.
-    SOURCE_PORT_CANDIDATES = range(30000, 30050)
+    # Windows 동적 포트 범위(49152~65535)가 TIME_WAIT 소켓으로 고갈되면
+    # 커널이 출발지 포트를 할당하지 못해 connect가 WinError 10048로 실패한다.
+    # 평소에는 커널에 맡기고, 그 상황에서만 동적 범위 밖의 포트로 우회한다.
+    FALLBACK_SOURCE_PORTS = range(30000, 30050)
 
     def __init__(self, timeout_seconds: int = 900) -> None:
         self._timeout_seconds = timeout_seconds
-        self._connection = self._connect_using_free_source_port()
+        self._connection = self._connect()
 
-    def _connect_using_free_source_port(self) -> http.client.HTTPConnection:
-        last_error: OSError | None = None
-        for source_port in self.SOURCE_PORT_CANDIDATES:
-            connection = http.client.HTTPConnection(
-                OLLAMA_HOST,
-                OLLAMA_PORT,
-                timeout=self._timeout_seconds,
-                source_address=(OLLAMA_HOST, source_port),
-            )
+    def _open(self, source_port: int | None) -> http.client.HTTPConnection:
+        source_address = (OLLAMA_HOST, source_port) if source_port else None
+        connection = http.client.HTTPConnection(
+            OLLAMA_HOST, OLLAMA_PORT, timeout=self._timeout_seconds, source_address=source_address
+        )
+        connection.connect()
+        return connection
+
+    def _connect(self) -> http.client.HTTPConnection:
+        try:
+            return self._open(source_port=None)
+        except OSError as error:
+            print(f"  기본 연결 실패({error}). 출발지 포트를 지정해 재시도", flush=True)
+
+        for source_port in self.FALLBACK_SOURCE_PORTS:
             try:
-                connection.connect()
-                print(f"  (출발지 포트 {source_port} 사용)", flush=True)
+                connection = self._open(source_port)
+                print(f"  출발지 포트 {source_port} 사용", flush=True)
                 return connection
-            except OSError as error:
-                last_error = error
-                connection.close()
-        raise RuntimeError(f"Ollama 연결 실패: {last_error}")
+            except OSError:
+                continue
+        raise RuntimeError("Ollama 연결 실패. 동적 포트 고갈 여부를 확인할 것")
 
     def get_json(self, path: str) -> dict:
         self._connection.request("GET", path)
