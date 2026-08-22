@@ -1,0 +1,21 @@
+# 가상환경
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 런타임 데이터 — 원본 PDF는 절대 커밋하지 않음 (노션 01 §18.6 저작권)
+data/
+
+# 환경별 설정
+.env
+
+# 벤치마크 원본 로그
+scripts/output/
+
+# IDE
+.vscode/
+.idea/
