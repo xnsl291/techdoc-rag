@@ -1,0 +1,8 @@
+# 두 대에서 작업하므로 줄바꿈을 저장소 기준(LF)으로 통일함.
+# 이 설정이 없으면 같은 파일이 기기마다 전체 변경으로 잡혀 diff를 읽을 수 없게 됨.
+* text=auto eol=lf
+
+# 바이너리
+*.pdf binary
+*.png binary
+*.jpg binary
