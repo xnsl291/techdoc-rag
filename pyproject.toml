@@ -9,6 +9,10 @@ requires-python = ">=3.12"
 dependencies = [
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
+    # PDF 파서. PyMuPDF는 AGPL-3.0이라 이 코드를 재사용하려는 쪽에 라이선스 부담을 넘긴다.
+    # pypdfium2는 BSD-3-Clause / Apache-2.0 택일이고 현재 요구(페이지 단위 텍스트 추출,
+    # 텍스트 없는 페이지 식별)에 충분하다. 표 추출이 병목이 되면 그때 재검토한다.
+    "pypdfium2>=5.13",
 ]
 
 [project.optional-dependencies]
