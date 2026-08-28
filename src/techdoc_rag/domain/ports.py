@@ -10,9 +10,29 @@ adapters 패키지의 구현체는 여기를 import하지 않는다. 구조적 �
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from pathlib import Path
 from typing import Protocol
 
 from techdoc_rag.domain.chunk import Chunk, RetrievedChunk
+from techdoc_rag.domain.parsing import ParsedDocument
+
+
+class PdfParser(Protocol):
+    """PDF에서 페이지 단위 텍스트를 추출한다.
+
+    문서를 열지 못하면 ParsingError를 던지고, 반쯤 처리된 결과를 돌려주지 않는다.
+    개별 페이지의 추출 오류는 예외가 아니라 ParsedDocument.failed_pages로 남긴다.
+    페이지 하나 때문에 문서 전체를 잃는 것보다 실패 위치를 식별한 채
+    계속 가는 쪽이 FR-002의 요구와 맞다.
+
+    parser_version은 문서 재색인 판단에 쓰인다. 파서가 바뀌면 같은 PDF에서
+    다른 텍스트가 나올 수 있으므로 Document.parser_version과 대조한다(NFR-004).
+    """
+
+    @property
+    def parser_version(self) -> str: ...
+
+    def parse(self, pdf_path: Path) -> ParsedDocument: ...
 
 
 class EmbeddingModel(Protocol):
