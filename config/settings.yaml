@@ -18,8 +18,11 @@ embedding:
   model_name: ""                    # [미확정] 평가셋 확보 후 후보를 비교해 결정한다
 
 chunking:
-  size_tokens: 512                  # [미확정, 시작점]
-  overlap_tokens: 64                # [미확정, 시작점]
+  # 크기 단위는 토큰이 아니라 문자 수다. 토큰을 세려면 토크나이저가 필요한데
+  # 임베딩 모델이 미정(M9)이라 지금 "tokens"라는 키는 지키지 못하는 약속이다.
+  # M9 확정 후 토큰 기준 전환을 재검토하며, 그때 config_version을 올린다.
+  size_chars: 1200                  # [미확정, 시작점]
+  overlap_chars: 150                # [미확정, 시작점]
   config_version: "v1"              # 설정이 바뀌면 올린다. 재색인 판단 근거가 된다
 
 retrieval:
