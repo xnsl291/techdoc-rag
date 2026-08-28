@@ -36,8 +36,8 @@ class EmbeddingSettings:
 
 @dataclass(frozen=True, slots=True)
 class ChunkingSettings:
-    size_tokens: int
-    overlap_tokens: int
+    size_chars: int
+    overlap_chars: int
     config_version: str
 
 
@@ -112,8 +112,8 @@ def load_settings(settings_path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
             model_name=raw.get("embedding", {}).get("model_name", ""),
         ),
         chunking=ChunkingSettings(
-            size_tokens=int(_require(chunking_section, "size_tokens", "chunking")),
-            overlap_tokens=int(_require(chunking_section, "overlap_tokens", "chunking")),
+            size_chars=int(_require(chunking_section, "size_chars", "chunking")),
+            overlap_chars=int(_require(chunking_section, "overlap_chars", "chunking")),
             config_version=_require(chunking_section, "config_version", "chunking"),
         ),
         retrieval=RetrievalSettings(
