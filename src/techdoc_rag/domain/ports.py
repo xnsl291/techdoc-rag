@@ -14,7 +14,42 @@ from pathlib import Path
 from typing import Protocol
 
 from techdoc_rag.domain.chunk import Chunk, RetrievedChunk
+from techdoc_rag.domain.document import Document
 from techdoc_rag.domain.parsing import ParsedDocument
+
+
+class DocumentRepository(Protocol):
+    """문서 생명주기의 정본을 관리한다(D-004, D-012).
+
+    "logical_document_id당 active 버전은 1개"라는 불변식은 구현체가 코드가 아니라
+    저장소 자체의 제약으로 강제해야 한다. 코드로만 지키면 버그 하나에 뚫리고,
+    점검(03 §22.7)은 사후 발견일 뿐이다.
+
+    활성 전환(activate)은 원자적이어야 한다. 신규 활성화와 구버전 비활성화
+    사이에 중단돼도 active가 2개이거나 0개인 상태가 관측되면 안 된다(01 §17.6).
+    """
+
+    def initialize(self) -> None: ...
+
+    def register(self, document: Document) -> None: ...
+
+    def get(self, document_id: str) -> Document | None: ...
+
+    def find_by_sha256(self, logical_document_id: str, sha256: str) -> Document | None: ...
+
+    def mark_indexing(self, document_id: str) -> None: ...
+
+    def heartbeat(self, document_id: str) -> None: ...
+
+    def mark_ready(self, document_id: str, chunk_count: int) -> None: ...
+
+    def mark_index_failed(self, document_id: str, error_message: str) -> None: ...
+
+    def activate(self, document_id: str) -> None: ...
+
+    def active_document_ids(self) -> list[str]: ...
+
+    def recover_stale_indexing(self, stale_after_seconds: int) -> list[str]: ...
 
 
 class PdfParser(Protocol):
