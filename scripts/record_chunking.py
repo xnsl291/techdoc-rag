@@ -41,8 +41,9 @@ def main() -> int:
         f"({settings.config_version}, [미확정, 시작점])"
     )
     print()
-    header = f"{'document_id':<12} {'페이지':>6} {'청크':>6} {'중앙값':>6} {'최소':>5} {'최대':>5} {'초':>6}"
-    print(header)
+    columns = ["document_id", "페이지", "청크", "중앙값", "최소", "최대", "초"]
+    widths = [12, 6, 6, 6, 5, 5, 6]
+    print(" ".join(f"{name:>{width}}" for name, width in zip(columns, widths, strict=True)))
 
     total_chunks = 0
     for entry in json.loads(arguments.manifest.read_text(encoding="utf-8")):
