@@ -24,6 +24,14 @@ class IndexingError(TechdocRagError):
     """임베딩 생성 또는 벡터 저장에 실패한 경우."""
 
 
+class MetadataStoreError(TechdocRagError):
+    """문서 메타데이터 저장소 접근 또는 제약 위반.
+
+    중복 등록, 활성 전환 실패, DB 연결 실패가 여기로 온다.
+    Parsing/Retrieval/Generation과 구분되는 네 번째 실패 축이다.
+    """
+
+
 class RetrievalError(TechdocRagError):
     """벡터 저장소 조회에 실패한 경우.
 
