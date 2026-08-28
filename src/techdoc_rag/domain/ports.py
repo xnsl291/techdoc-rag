@@ -35,6 +35,27 @@ class PdfParser(Protocol):
     def parse(self, pdf_path: Path) -> ParsedDocument: ...
 
 
+class Chunker(Protocol):
+    """파싱된 문서를 검색 단위로 나눈다.
+
+    같은 입력에서 항상 같은 chunk_id·본문·페이지 범위가 나와야 한다(01 §12).
+    결정론이 깨지면 재실행할 때마다 Qdrant에 다른 ID로 중복 벡터가 쌓인다.
+
+    빈 문서는 오류가 아니라 빈 목록이다. 색인할 것이 없다는 사실은
+    Ingestion 단계에서 문서 상태로 다루지, 예외로 다루지 않는다.
+    """
+
+    @property
+    def chunk_config_version(self) -> str: ...
+
+    def chunk(
+        self,
+        parsed_document: ParsedDocument,
+        document_id: str,
+        document_version: int,
+    ) -> list[Chunk]: ...
+
+
 class EmbeddingModel(Protocol):
     """텍스트를 벡터로 변환한다.
 
