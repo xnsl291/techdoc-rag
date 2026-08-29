@@ -57,13 +57,18 @@ class QdrantVectorStore:
         self._distance = distance
 
     def initialize(self) -> None:
-        """컬렉션이 없으면 만든다. 이미 있으면 아무것도 하지 않는다.
+        """컬렉션이 없으면 만들고, 이미 있으면 벡터 구성이 맞는지 본다.
+
+        임베딩 모델을 바꾸면 벡터 차원이 달라진다. 그런데 같은 이름으로 붙으면
+        여기서는 에러 없이 넘어가고, 색인을 한참 돌린 뒤에야 저장할 때마다 실패한다.
 
         document_id에 인덱스를 건다. 활성 문서 필터가 모든 검색에 붙으므로
         인덱스가 없으면 문서가 늘수록 전수 검사가 된다.
         """
         try:
-            if not self._client.collection_exists(self._collection_name):
+            if self._client.collection_exists(self._collection_name):
+                self._verify_existing_collection()
+            else:
                 self._client.create_collection(
                     collection_name=self._collection_name,
                     vectors_config=models.VectorParams(
@@ -75,8 +80,24 @@ class QdrantVectorStore:
                 field_name="document_id",
                 field_schema=models.PayloadSchemaType.KEYWORD,
             )
+        except IndexingError:
+            raise
         except Exception as error:
             raise IndexingError(f"컬렉션 준비 실패: {error}") from error
+
+    def _verify_existing_collection(self) -> None:
+        existing = self._client.get_collection(self._collection_name).config.params.vectors
+        if not isinstance(existing, models.VectorParams):
+            raise IndexingError(
+                f"컬렉션 {self._collection_name}이 이름 있는 벡터 구성이라 쓸 수 없음"
+            )
+        if existing.size != self._vector_size or existing.distance != self._distance:
+            raise IndexingError(
+                f"컬렉션 {self._collection_name}의 벡터 구성이 다름: "
+                f"기존 {existing.size}차원 {existing.distance}, "
+                f"요청 {self._vector_size}차원 {self._distance}. "
+                f"임베딩 모델을 바꿨다면 새 컬렉션으로 재색인할 것"
+            )
 
     def upsert(self, chunks: Sequence[Chunk], vectors: Sequence[Sequence[float]]) -> None:
         if len(chunks) != len(vectors):
