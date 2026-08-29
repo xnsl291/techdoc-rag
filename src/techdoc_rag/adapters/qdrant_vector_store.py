@@ -100,17 +100,20 @@ class QdrantVectorStore:
             )
 
     def upsert(self, chunks: Sequence[Chunk], vectors: Sequence[Sequence[float]]) -> None:
+        """청크와 벡터를 저장한다. 같은 chunk_id는 덮어쓴다.
+
+        차원 검사를 백엔드에 맡기지 않는다. 맡기면 로컬과 서버가 서로 다른 예외를 던지고,
+        로컬은 실패한 지점 앞까지 이미 써버려 컬렉션이 어중간하게 남는다.
+        """
         if len(chunks) != len(vectors):
-            raise IndexingError(
-                f"청크 {len(chunks)}개와 벡터 {len(vectors)}개의 수가 다름"
-            )
+            raise IndexingError(f"청크 {len(chunks)}개와 벡터 {len(vectors)}개의 수가 다름")
         if not chunks:
             return
 
         points = [
             models.PointStruct(
                 id=self._point_id(chunk.chunk_id),
-                vector=list(vector),
+                vector=self._validated_vector(vector, chunk.chunk_id),
                 payload={field: getattr(chunk, field) for field in _PAYLOAD_FIELDS},
             )
             for chunk, vector in zip(chunks, vectors, strict=True)
@@ -124,6 +127,14 @@ class QdrantVectorStore:
                 raise IndexingError(
                     f"벡터 저장 실패 ({start}번째부터 {len(batch)}개): {error}"
                 ) from error
+
+    def _validated_vector(self, vector: Sequence[float], chunk_id: str) -> list[float]:
+        if len(vector) != self._vector_size:
+            raise IndexingError(
+                f"청크 {chunk_id}의 벡터가 {len(vector)}차원임. "
+                f"컬렉션은 {self._vector_size}차원을 요구함"
+            )
+        return list(vector)
 
     def search(
         self,
@@ -139,6 +150,11 @@ class QdrantVectorStore:
         """
         if not active_document_ids:
             return []
+        if len(query_vector) != self._vector_size:
+            raise RetrievalError(
+                f"질의 벡터가 {len(query_vector)}차원임. "
+                f"컬렉션은 {self._vector_size}차원을 요구함"
+            )
 
         try:
             response = self._client.query_points(

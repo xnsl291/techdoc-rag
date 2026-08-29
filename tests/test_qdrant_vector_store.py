@@ -136,8 +136,30 @@ def test_청크와_벡터_개수가_다르면_거부한다(store: QdrantVectorSt
 
 
 def test_벡터_차원이_맞지_않으면_IndexingError(store: QdrantVectorStore) -> None:
-    with pytest.raises(IndexingError):
+    """어댑터가 직접 막는다. 백엔드에 맡기면 로컬과 서버가 서로 다른 예외를 던진다."""
+    with pytest.raises(IndexingError) as error:
         store.upsert([_chunk("doc-a:0001")], [[1.0, 2.0]])
+
+    assert "doc-a:0001" in str(error.value)
+    assert store.count() == 0
+
+
+def test_차원이_틀린_벡터는_앞의_청크도_저장하지_않는다(store: QdrantVectorStore) -> None:
+    """전송 전에 검사가 끝나므로 컬렉션이 어중간하게 남지 않는다."""
+    with pytest.raises(IndexingError):
+        store.upsert(
+            [_chunk("doc-a:0001"), _chunk("doc-a:0002")],
+            [_vector(1.0), [1.0, 2.0]],
+        )
+
+    assert store.count() == 0
+
+
+def test_질의_벡터_차원이_다르면_RetrievalError(store: QdrantVectorStore) -> None:
+    store.upsert([_chunk("doc-a:0001")], [_vector(1.0)])
+
+    with pytest.raises(RetrievalError):
+        store.search([1.0, 2.0], top_k=5, active_document_ids=["doc-a"])
 
 
 def test_배치_크기를_넘겨도_전부_저장된다(store: QdrantVectorStore) -> None:
