@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 from qdrant_client import QdrantClient
 
-from techdoc_rag.adapters.qdrant_vector_store import QdrantVectorStore
+from techdoc_rag.adapters.qdrant_vector_store import UPSERT_BATCH_SIZE, QdrantVectorStore
 from techdoc_rag.domain.chunk import Chunk
 from techdoc_rag.domain.errors import IndexingError, RetrievalError
 
@@ -138,6 +138,15 @@ def test_청크와_벡터_개수가_다르면_거부한다(store: QdrantVectorSt
 def test_벡터_차원이_맞지_않으면_IndexingError(store: QdrantVectorStore) -> None:
     with pytest.raises(IndexingError):
         store.upsert([_chunk("doc-a:0001")], [[1.0, 2.0]])
+
+
+def test_배치_크기를_넘겨도_전부_저장된다(store: QdrantVectorStore) -> None:
+    """실물은 2,454청크다. 한 요청에 다 담으면 서버가 거부한다."""
+    count = UPSERT_BATCH_SIZE * 2 + 5
+    chunks = [_chunk(f"doc-a:{index:04d}", page_start=index + 1) for index in range(count)]
+    store.upsert(chunks, [_vector(1.0) for _ in range(count)])
+
+    assert store.count() == count
 
 
 def test_top_k만큼만_돌려준다(store: QdrantVectorStore) -> None:
