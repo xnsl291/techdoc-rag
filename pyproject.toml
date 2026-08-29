@@ -13,6 +13,8 @@ dependencies = [
     # pypdfium2는 BSD-3-Clause / Apache-2.0 택일이고 현재 요구(페이지 단위 텍스트 추출,
     # 텍스트 없는 페이지 식별)에 충분하다. 표 추출이 병목이 되면 그때 재검토한다.
     "pypdfium2>=5.13",
+    # 벡터 저장소. 로컬 모드(:memory:)를 지원해 테스트에 서버가 필요 없다.
+    "qdrant-client>=1.12",
 ]
 
 [project.optional-dependencies]
@@ -38,3 +40,8 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # 로컬 모드에는 payload 인덱스가 없다는 경고. 운영 서버에서는 필요한 호출이라
+    # 코드를 빼지 않고 테스트 출력에서만 가린다.
+    "ignore:Payload indexes have no effect in the local Qdrant:UserWarning",
+]
