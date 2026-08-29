@@ -36,6 +36,10 @@ _PAYLOAD_FIELDS = (
     "section",
 )
 
+# 한 번에 보낼 포인트 수. 실물이 6건 3,021페이지에서 2,454청크이고 본문이 1,200자 안팎이라
+# 전량을 한 요청에 담으면 수십 MB가 된다. 서버에는 요청 크기 제한이 있어 거부한다.
+UPSERT_BATCH_SIZE = 128
+
 
 class QdrantVectorStore:
     """VectorStore Protocol 구현."""
@@ -90,10 +94,15 @@ class QdrantVectorStore:
             )
             for chunk, vector in zip(chunks, vectors, strict=True)
         ]
-        try:
-            self._client.upsert(collection_name=self._collection_name, points=points)
-        except Exception as error:
-            raise IndexingError(f"벡터 저장 실패: {error}") from error
+        # 중간에 끊겨도 다시 실행하면 된다. 포인트 ID가 결정론적이라 이미 넣은 것은 덮어써진다.
+        for start in range(0, len(points), UPSERT_BATCH_SIZE):
+            batch = points[start : start + UPSERT_BATCH_SIZE]
+            try:
+                self._client.upsert(collection_name=self._collection_name, points=batch)
+            except Exception as error:
+                raise IndexingError(
+                    f"벡터 저장 실패 ({start}번째부터 {len(batch)}개): {error}"
+                ) from error
 
     def search(
         self,
