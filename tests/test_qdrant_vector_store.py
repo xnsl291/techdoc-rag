@@ -9,10 +9,16 @@ active 목록이 비었을 때 전체를 돌려주지는 않는가.
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from qdrant_client import QdrantClient
 
-from techdoc_rag.adapters.qdrant_vector_store import UPSERT_BATCH_SIZE, QdrantVectorStore
+from techdoc_rag.adapters.qdrant_vector_store import (
+    POINT_ID_NAMESPACE,
+    UPSERT_BATCH_SIZE,
+    QdrantVectorStore,
+)
 from techdoc_rag.domain.chunk import Chunk
 from techdoc_rag.domain.errors import IndexingError, RetrievalError
 
@@ -36,11 +42,14 @@ def _vector(seed: float) -> list[float]:
 
 
 @pytest.fixture
-def store() -> QdrantVectorStore:
+def client() -> QdrantClient:
+    return QdrantClient(location=":memory:")
+
+
+@pytest.fixture
+def store(client: QdrantClient) -> QdrantVectorStore:
     vector_store = QdrantVectorStore(
-        client=QdrantClient(location=":memory:"),
-        collection_name="test",
-        vector_size=VECTOR_SIZE,
+        client=client, collection_name="test", vector_size=VECTOR_SIZE
     )
     vector_store.initialize()
     return vector_store
@@ -212,3 +221,49 @@ def test_기존_컬렉션의_벡터_차원이_다르면_거부한다() -> None:
         other.initialize()
 
     assert "재색인" in str(error.value)
+
+
+def test_payload에_is_active가_들어가지_않는다(
+    store: QdrantVectorStore, client: QdrantClient
+) -> None:
+    """활성 여부의 정본은 SQLite다. 양쪽에 두면 전환 시점에 서로 어긋난다.
+
+    키 집합을 통째로 단정한다. 필드가 하나라도 늘거나 빠지면 여기서 깨져야 한다.
+    """
+    store.upsert([_chunk("doc-a:0001")], [_vector(1.0)])
+
+    points, _ = client.scroll(
+        collection_name="test", limit=1, with_payload=True, with_vectors=False
+    )
+
+    assert set(points[0].payload) == {
+        "chunk_id",
+        "document_id",
+        "document_version",
+        "page_start",
+        "page_end",
+        "text",
+        "section",
+    }
+
+
+def test_포인트_ID_생성_규칙이_바뀌지_않는다() -> None:
+    """네임스페이스가 바뀌면 기존 벡터를 덮어쓰지 못하고 전부 새로 적재된다.
+
+    멱등성 테스트는 같은 프로세스 안이라 이 회귀를 못 잡는다. 기대값을 박아 둔다.
+    """
+    assert QdrantVectorStore.point_id("doc-a:0001") == str(
+        uuid.uuid5(POINT_ID_NAMESPACE, "doc-a:0001")
+    )
+    assert QdrantVectorStore.point_id("doc-a:0001") == "fdcff69e-7245-530a-ae03-5c8e0d050d92"
+
+
+def test_검색_결과는_유사도_내림차순이다(store: QdrantVectorStore) -> None:
+    chunks = [_chunk(f"doc-a:{index:04d}", page_start=index + 1) for index in range(3)]
+    store.upsert(chunks, [[1.0, 0.0, 0.0, 0.0], [0.9, 0.4, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
+
+    results = store.search([1.0, 0.0, 0.0, 0.0], top_k=3, active_document_ids=["doc-a"])
+
+    scores = [result.score for result in results]
+    assert scores == sorted(scores, reverse=True)
+    assert results[0].chunk.chunk_id == "doc-a:0000"

@@ -26,6 +26,7 @@ POINT_ID_NAMESPACE = uuid.UUID("6f2b1e3c-7a94-4f0d-9c1b-2d5e8a3f7b60")
 
 # payload 키. Chunk의 필드명을 그대로 쓴다. 저장소마다 이름이 달라지면
 # 어느 쪽 표기가 맞는지 매번 확인해야 한다.
+# is_active는 여기 없다. 활성 여부의 정본은 SQLite다(CR-04).
 _PAYLOAD_FIELDS = (
     "chunk_id",
     "document_id",
@@ -112,7 +113,7 @@ class QdrantVectorStore:
 
         points = [
             models.PointStruct(
-                id=self._point_id(chunk.chunk_id),
+                id=self.point_id(chunk.chunk_id),
                 vector=self._validated_vector(vector, chunk.chunk_id),
                 payload={field: getattr(chunk, field) for field in _PAYLOAD_FIELDS},
             )
@@ -203,7 +204,7 @@ class QdrantVectorStore:
             raise RetrievalError(f"벡터 수 조회 실패: {error}") from error
 
     @staticmethod
-    def _point_id(chunk_id: str) -> str:
+    def point_id(chunk_id: str) -> str:
         """chunk_id에서 포인트 ID를 만든다.
 
         Qdrant의 포인트 ID는 정수나 UUID만 허용하므로 chunk_id를 그대로 못 쓴다.
