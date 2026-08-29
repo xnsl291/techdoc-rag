@@ -178,3 +178,15 @@ def test_initialize는_여러_번_불러도_안전하다(store: QdrantVectorStor
     store.upsert([_chunk("doc-a:0001")], [_vector(1.0)])
     store.initialize()
     assert store.count() == 1
+
+
+def test_기존_컬렉션의_벡터_차원이_다르면_거부한다() -> None:
+    """임베딩 모델을 바꾸고 같은 컬렉션에 붙는 상황. 색인 도중이 아니라 시작 시점에 끊는다."""
+    client = QdrantClient(location=":memory:")
+    QdrantVectorStore(client=client, collection_name="test", vector_size=4).initialize()
+
+    other = QdrantVectorStore(client=client, collection_name="test", vector_size=768)
+    with pytest.raises(IndexingError) as error:
+        other.initialize()
+
+    assert "재색인" in str(error.value)
