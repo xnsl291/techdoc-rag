@@ -171,10 +171,13 @@ class QdrantVectorStore:
                     ]
                 ),
             )
+            # 변환도 여기 안에 둔다. payload 형식이 바뀐 뒤 옛 벡터가 남아 있으면
+            # KeyError가 서비스 계층까지 그대로 전달되어 No-answer 분기를 타지 못한다.
+            return [self._to_retrieved_chunk(point) for point in response.points]
+        except (KeyError, TypeError) as error:
+            raise RetrievalError(f"검색 결과의 payload 형식이 예상과 다름: {error}") from error
         except Exception as error:
             raise RetrievalError(f"벡터 검색 실패: {error}") from error
-
-        return [self._to_retrieved_chunk(point) for point in response.points]
 
     def delete_document(self, document_id: str) -> None:
         """한 문서의 벡터를 모두 지운다. 없는 문서를 지워도 오류가 아니다."""
