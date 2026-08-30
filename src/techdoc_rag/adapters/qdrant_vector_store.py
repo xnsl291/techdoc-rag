@@ -44,6 +44,14 @@ _INDEX_RUN_PAYLOAD_FIELDS = ("logical_document_id", "document_type", "index_run_
 # 활성 여부의 정본은 SQLite이고, 양쪽에 두면 전환 시점에 서로 어긋난다(CR-04).
 PAYLOAD_FIELDS = _CHUNK_PAYLOAD_FIELDS + _INDEX_RUN_PAYLOAD_FIELDS
 
+# 검색이나 삭제에서 필터 조건으로 쓰는 필드. 인덱스를 건다.
+_FILTERED_PAYLOAD_FIELDS = (
+    "document_id",
+    "logical_document_id",
+    "document_type",
+    "index_run_id",
+)
+
 # 한 번에 보낼 포인트 수. 실물이 6건 3,021페이지에서 2,454청크이고 본문이 1,200자 안팎이라
 # 전량을 한 요청에 담으면 수십 MB가 된다. 서버에는 요청 크기 제한이 있어 거부한다.
 UPSERT_BATCH_SIZE = 128
@@ -70,8 +78,9 @@ class QdrantVectorStore:
         임베딩 모델을 바꾸면 벡터 차원이 달라진다. 그런데 같은 이름으로 붙으면
         여기서는 에러 없이 넘어가고, 색인을 한참 돌린 뒤에야 저장할 때마다 실패한다.
 
-        document_id에 인덱스를 건다. 활성 문서 필터가 모든 검색에 붙으므로
-        인덱스가 없으면 문서가 늘수록 전수 검사가 된다.
+        필터에 쓰는 필드마다 인덱스를 건다. 활성 문서 필터가 모든 검색에 붙고,
+        계열과 종류로 좁히는 검색도 예정되어 있다. 인덱스가 없으면 문서가 늘수록
+        전수 검사가 된다. index_run_id는 고아 벡터를 필터로 지울 때 쓴다.
         """
         try:
             if self._client.collection_exists(self._collection_name):
@@ -83,11 +92,12 @@ class QdrantVectorStore:
                         size=self._vector_size, distance=self._distance
                     ),
                 )
-            self._client.create_payload_index(
-                collection_name=self._collection_name,
-                field_name="document_id",
-                field_schema=models.PayloadSchemaType.KEYWORD,
-            )
+            for field_name in _FILTERED_PAYLOAD_FIELDS:
+                self._client.create_payload_index(
+                    collection_name=self._collection_name,
+                    field_name=field_name,
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
         except IndexingError:
             raise
         except Exception as error:
@@ -117,11 +127,23 @@ class QdrantVectorStore:
 
         차원 검사를 백엔드에 맡기지 않는다. 맡기면 로컬과 서버가 서로 다른 예외를 던지고,
         로컬은 실패한 지점 앞까지 이미 써버려 컬렉션이 어중간하게 남는다.
+
+        청크가 index_run과 같은 문서인지도 검사한다. 다르면 payload에 사실과 다른
+        계열이 박히는데, 오류가 나지 않아 검색 결과가 조용히 틀린다.
         """
         if len(chunks) != len(vectors):
             raise IndexingError(f"청크 {len(chunks)}개와 벡터 {len(vectors)}개의 수가 다름")
         if not chunks:
             return
+
+        # payload에 다른 문서의 계열이 박히면 계열 필터로 검색할 때 엉뚱한 문서가 나온다.
+        # 값이 사실과 다른데 오류가 나지 않으므로 여기서 막는다.
+        mismatched = {chunk.document_id for chunk in chunks} - {index_run.document_id}
+        if mismatched:
+            raise IndexingError(
+                f"색인 실행({index_run.document_id})과 다른 문서의 청크가 섞임: "
+                f"{sorted(mismatched)}"
+            )
 
         points = [
             models.PointStruct(
