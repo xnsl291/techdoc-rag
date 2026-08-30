@@ -15,7 +15,6 @@ import pytest
 from qdrant_client import QdrantClient
 
 from techdoc_rag.adapters.qdrant_vector_store import (
-    PAYLOAD_FIELDS,
     POINT_ID_NAMESPACE,
     UPSERT_BATCH_SIZE,
     QdrantVectorStore,
@@ -43,8 +42,9 @@ def _vector(seed: float) -> list[float]:
     return [seed, 0.0, 0.0, 0.0]
 
 
-def _index_run(logical_document_id: str = "ls-g100") -> IndexRun:
+def _index_run(document_id: str = "doc-a", logical_document_id: str = "ls-g100") -> IndexRun:
     return IndexRun(
+        document_id=document_id,
         logical_document_id=logical_document_id,
         document_type="manual",
         index_run_id="run-0001",
@@ -113,7 +113,11 @@ def test_같은_chunk_id로_본문이_바뀌면_덮어쓴다(store: QdrantVector
 
 def test_active_목록에_없는_문서는_검색되지_않는다(store: QdrantVectorStore) -> None:
     store.upsert([_chunk("doc-a:0001", document_id="doc-a")], [_vector(1.0)], _index_run())
-    store.upsert([_chunk("doc-b:0001", document_id="doc-b")], [_vector(1.0)], _index_run())
+    store.upsert(
+        [_chunk("doc-b:0001", document_id="doc-b")],
+        [_vector(1.0)],
+        _index_run(document_id="doc-b", logical_document_id="ls-s100"),
+    )
 
     results = store.search(_vector(1.0), top_k=10, active_document_ids=["doc-a"])
 
@@ -129,7 +133,11 @@ def test_active_목록이_비면_빈_결과를_돌려준다(store: QdrantVectorS
 
 def test_delete_document는_다른_문서를_건드리지_않는다(store: QdrantVectorStore) -> None:
     store.upsert([_chunk("doc-a:0001", document_id="doc-a")], [_vector(1.0)], _index_run())
-    store.upsert([_chunk("doc-b:0001", document_id="doc-b")], [_vector(1.0)], _index_run())
+    store.upsert(
+        [_chunk("doc-b:0001", document_id="doc-b")],
+        [_vector(1.0)],
+        _index_run(document_id="doc-b", logical_document_id="ls-s100"),
+    )
 
     store.delete_document("doc-a")
 
@@ -254,8 +262,44 @@ def test_payload에_필수_필드가_전부_들어간다(
 ) -> None:
     """필드를 빼먹으면 깨진다. 늘리는 것은 막지 않는다 — 스키마를 동결하면
     나중에 필요한 필드를 추가할 때 테스트부터 고쳐야 한다.
+
+    기대값을 구현에서 가져오지 않는다. 구현 상수를 import하면 거기서 필드를 빼도
+    기대값이 같이 줄어 테스트가 통과한다.
     """
-    assert set(PAYLOAD_FIELDS) <= set(_stored_payload(store, client))
+    assert {
+        "chunk_id",
+        "document_id",
+        "document_version",
+        "page_start",
+        "page_end",
+        "text",
+        "section",
+        "logical_document_id",
+        "document_type",
+        "index_run_id",
+    } <= set(_stored_payload(store, client))
+
+
+def test_payload에_문서_단위_값은_들어가지_않는다(
+    store: QdrantVectorStore, client: QdrantClient
+) -> None:
+    """청크마다 복제하면 벡터 수만큼 중복된다. 이 값들은 SQLite에 있다."""
+    payload = _stored_payload(store, client)
+
+    assert "chunk_config_version" not in payload
+    assert "embedding_model" not in payload
+
+
+def test_다른_문서의_청크가_섞이면_거부한다(store: QdrantVectorStore) -> None:
+    """payload에 사실과 다른 계열이 박히면 계열 필터 검색이 조용히 틀린다."""
+    with pytest.raises(IndexingError) as error:
+        store.upsert(
+            [_chunk("doc-a:0001", document_id="doc-a"), _chunk("doc-b:0001", document_id="doc-b")],
+            [_vector(1.0), _vector(1.0)],
+            _index_run(document_id="doc-a"),
+        )
+
+    assert "doc-b" in str(error.value)
 
 
 def test_payload에_색인_실행_정보가_복제된다(

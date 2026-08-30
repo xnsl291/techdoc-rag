@@ -16,12 +16,16 @@ Vector Store 필터로 넘긴다.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from techdoc_rag.domain.document import Document, DocumentStatus
 from techdoc_rag.domain.errors import MetadataStoreError
+from techdoc_rag.domain.indexing import validate_logical_document_id
+
+_logger = logging.getLogger(__name__)
 
 _STATUS_VALUES = ", ".join(f"'{status.value}'" for status in DocumentStatus)
 
@@ -52,7 +56,7 @@ CREATE TABLE IF NOT EXISTS documents (
     last_error           TEXT,
     chunk_count          INTEGER,
     -- 누가 이 문서를 색인 중인지. 없으면 두 번째 프로세스가 살아 있는 색인을
-    -- 죽은 것으로 보고 강등시킨다.
+    -- 죽은 것으로 보고 강등한다.
     owner_id             TEXT,
     lease_until          TEXT,
     -- 파싱 결과. 색인이 끝나면 메모리에서 사라지므로 여기 남긴다(FR-002).
@@ -69,6 +73,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_documents_active
 
 CREATE INDEX IF NOT EXISTS ix_documents_status ON documents (status);
 """
+
+
+# 스키마가 최신인지 확인하는 데 쓴다. 새로 추가한 컬럼만 담는다.
+_EXPECTED_COLUMNS = {
+    "owner_id",
+    "lease_until",
+    "failed_page_count",
+    "pages_without_text_layer",
+}
 
 
 def _now_iso() -> str:
@@ -91,13 +104,51 @@ class SqliteDocumentRepository:
         self._connection.close()
 
     def initialize(self) -> None:
+        """스키마를 만들고, 이미 있으면 기대하는 컬럼이 다 있는지 확인한다.
+
+        CREATE TABLE IF NOT EXISTS는 기존 테이블에 컬럼을 더하지 않는다.
+        옛 스키마로 만든 DB에 그대로 붙으면 첫 상태 갱신에서 no such column이
+        SQL 오류로 감싸져 나와 원인을 알 수 없다. 여기서 끊는다.
+        """
         try:
             self._connection.executescript(_SCHEMA)
             self._connection.commit()
         except sqlite3.Error as exc:
             raise MetadataStoreError(f"스키마 생성 실패: {exc}") from exc
 
+        existing = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(documents)").fetchall()
+        }
+        missing = _EXPECTED_COLUMNS - existing
+        if missing:
+            raise MetadataStoreError(
+                f"documents 테이블에 컬럼이 없음: {sorted(missing)}. "
+                f"옛 스키마로 만든 DB임. 개발 중이면 파일을 지우고 다시 만들 것"
+            )
+
     def register(self, document: Document) -> None:
+        """문서를 등록한다.
+
+        계열이 다른데 같은 해시가 이미 있으면 경고만 남기고 등록은 진행한다.
+        계열 ID 오타로 같은 파일이 두 번 들어오면 둘 다 활성이 되어 같은 근거가
+        두 번 검색된다. 다만 같은 PDF가 두 제품에 공용으로 쓰이는 경우도 있어
+        막지는 않는다.
+        """
+        validate_logical_document_id(document.logical_document_id)
+        duplicates = [
+            existing
+            for existing in self.find_sha256_across_series(document.sha256)
+            if existing.logical_document_id != document.logical_document_id
+        ]
+        if duplicates:
+            _logger.warning(
+                "같은 해시가 다른 계열에 이미 있음: %s (해시 %s, 기존 계열 %s). "
+                "계열 ID 오타인지 확인할 것",
+                document.document_id,
+                document.sha256[:12],
+                sorted({existing.logical_document_id for existing in duplicates}),
+            )
         try:
             self._connection.execute(
                 """
@@ -241,22 +292,45 @@ class SqliteDocumentRepository:
             failure_hint="색인 중이 아니거나 소유자가 아님",
         )
 
-    def mark_ready(self, document_id: str, chunk_count: int) -> None:
+    def mark_ready(self, document_id: str, owner_id: str, chunk_count: int) -> None:
+        """색인 완료를 확정한다. 소유권을 잃었으면 쓸 수 없다.
+
+        조건이 없으면 복구가 이미 강등한 문서를 원래 프로세스가 READY로 되돌린다.
+        강등 기록과 실제 상태가 어긋나고, 소유권 없는 프로세스의 결과가 확정된다.
+        """
         self._update_status(
             document_id,
             """
             UPDATE documents
-               SET status = ?, indexed_at = ?, chunk_count = ?
-             WHERE document_id = ?
+               SET status = ?, indexed_at = ?, chunk_count = ?,
+                   owner_id = NULL, lease_until = NULL
+             WHERE document_id = ? AND status = ? AND owner_id = ?
             """,
-            (DocumentStatus.READY.value, _now_iso(), chunk_count, document_id),
+            (
+                DocumentStatus.READY.value,
+                _now_iso(),
+                chunk_count,
+                document_id,
+                DocumentStatus.INDEXING.value,
+                owner_id,
+            ),
         )
 
-    def mark_index_failed(self, document_id: str, error_message: str) -> None:
+    def mark_index_failed(self, document_id: str, owner_id: str, error_message: str) -> None:
         self._update_status(
             document_id,
-            "UPDATE documents SET status = ?, last_error = ? WHERE document_id = ?",
-            (DocumentStatus.INDEX_FAILED.value, error_message, document_id),
+            """
+            UPDATE documents
+               SET status = ?, last_error = ?, owner_id = NULL, lease_until = NULL
+             WHERE document_id = ? AND status = ? AND owner_id = ?
+            """,
+            (
+                DocumentStatus.INDEX_FAILED.value,
+                error_message,
+                document_id,
+                DocumentStatus.INDEXING.value,
+                owner_id,
+            ),
         )
 
     def activate(self, document_id: str) -> None:
@@ -304,59 +378,76 @@ class SqliteDocumentRepository:
         ).fetchall()
         return [row["document_id"] for row in rows]
 
-    def recover_stale_indexing(self, stale_after_seconds: int) -> list[str]:
-        """리스가 만료된 INDEXING 문서를 INDEX_FAILED로 강등한다.
+    def recover_abandoned_indexing(self, owner_id: str | None = None) -> list[str]:
+        """버려진 INDEXING 문서를 INDEX_FAILED로 강등한다.
 
         INDEXING에서 나가는 전이는 원래 프로세스가 살아 있어야 기록되므로,
         죽은 프로세스가 남긴 문서는 이 복구가 없으면 영구 고착된다(CR-02).
-        기동 시 한 번 호출한다.
+        기동 시 한 번, 그리고 주기적으로 호출한다.
 
-        판정 기준은 리스다. 살아 있는 프로세스는 heartbeat으로 리스를 계속
-        연장하므로, 리스가 만료됐다는 것은 그 프로세스가 멈췄다는 뜻이다.
-        리스 없이 기록된 옛 행만 stale_after_seconds로 판정한다.
+        두 가지를 회수한다.
+
+        - **리스가 만료된 것.** 살아 있는 프로세스는 heartbeat으로 리스를 계속
+          연장하므로, 만료됐다는 것은 그 프로세스가 멈췄다는 뜻이다
+        - **owner_id를 주면 그 소유자의 것.** 리스가 남아 있어도 회수한다.
+          같은 owner_id로 다시 올라온 프로세스는 정의상 이전 자신이 죽었다는 뜻이다.
+          이게 없으면 리스(수 분)보다 빨리 재기동했을 때 그 문서가 영구히 갇힌다
+
+        후자가 성립하려면 owner_id가 재기동에도 유지되는 값이어야 한다.
+        호스트명과 워커 번호처럼 프로세스가 아니라 자리를 가리키는 값을 쓴다.
         """
-        now_iso = _now_iso()
-        cutoff = datetime.now(UTC) - timedelta(seconds=stale_after_seconds)
-        cutoff_iso = cutoff.isoformat()
+        conditions = ["lease_until IS NULL", "lease_until < ?"]
+        parameters: list[str] = [_now_iso()]
+        if owner_id is not None:
+            conditions.append("owner_id = ?")
+            parameters.append(owner_id)
+
         try:
             rows = self._connection.execute(
-                """
+                f"""
                 UPDATE documents
                    SET status = ?,
-                       last_error = 'stale lease: 색인 중 프로세스 중단으로 판정',
+                       last_error = '색인 중 프로세스가 중단된 것으로 판정',
                        owner_id = NULL, lease_until = NULL
-                 WHERE status = ?
-                   AND (
-                        (lease_until IS NOT NULL AND lease_until < ?)
-                     OR (lease_until IS NULL AND (heartbeat_at IS NULL OR heartbeat_at < ?))
-                   )
+                 WHERE status = ? AND ({" OR ".join(conditions)})
                 RETURNING document_id
                 """,
-                (
-                    DocumentStatus.INDEX_FAILED.value,
-                    DocumentStatus.INDEXING.value,
-                    now_iso,
-                    cutoff_iso,
-                ),
+                (DocumentStatus.INDEX_FAILED.value, DocumentStatus.INDEXING.value, *parameters),
             ).fetchall()
             self._connection.commit()
             return [row["document_id"] for row in rows]
         except sqlite3.Error as exc:
             self._connection.rollback()
-            raise MetadataStoreError(f"stale INDEXING 복구 실패: {exc}") from exc
+            raise MetadataStoreError(f"버려진 색인 복구 실패: {exc}") from exc
 
     def _update_status(
-        self, document_id: str, sql: str, parameters: tuple, failure_hint: str = "대상 없음"
+        self, document_id: str, sql: str, parameters: tuple, failure_hint: str = ""
     ) -> None:
         try:
             cursor = self._connection.execute(sql, parameters)
             if cursor.rowcount == 0:
                 self._connection.rollback()
-                raise MetadataStoreError(f"상태 갱신 실패: {document_id} — {failure_hint}")
+                raise MetadataStoreError(self._explain_no_match(document_id, failure_hint))
             self._connection.commit()
         except sqlite3.Error as exc:
             self._connection.rollback()
             raise MetadataStoreError(f"상태 갱신 실패: {document_id} ({exc})") from exc
+
+    def _explain_no_match(self, document_id: str, failure_hint: str) -> str:
+        """갱신 대상이 없는 이유를 찾아 메시지로 만든다.
+
+        rowcount가 0인 원인은 여럿이다. 문서가 없거나, 상태가 안 맞거나,
+        소유자가 다르다. 고정 문구를 쓰면 로그만 보고 원인을 반대로 짚게 된다.
+        오류 경로라 조회를 한 번 더 하는 비용은 문제가 되지 않는다.
+        """
+        row = self._connection.execute(
+            "SELECT status, owner_id FROM documents WHERE document_id = ?", (document_id,)
+        ).fetchone()
+        if row is None:
+            return f"상태 갱신 실패: {document_id} — 문서 없음"
+        detail = f"현재 상태 {row['status']}, 소유자 {row['owner_id'] or '없음'}"
+        hint = f". {failure_hint}" if failure_hint else ""
+        return f"상태 갱신 실패: {document_id} — 조건 불일치 ({detail}){hint}"
 
 
 def _to_document(row: sqlite3.Row) -> Document:
@@ -384,4 +475,6 @@ def _to_document(row: sqlite3.Row) -> Document:
         embedding_version=row["embedding_version"],
         indexed_at=_parse_datetime(row["indexed_at"]),
         deleted_at=_parse_datetime(row["deleted_at"]),
+        failed_page_count=row["failed_page_count"],
+        pages_without_text_layer=row["pages_without_text_layer"],
     )

@@ -31,6 +31,11 @@ class DocumentRepository(Protocol):
 
     재색인은 항상 새 버전을 등록해서 한다(DP-50). 같은 document_id를 제자리에서
     다시 색인하면 is_active가 1인 채로 검색에서 빠진다. mark_indexing이 이를 막는다.
+    이전 버전으로 되돌리는 것도 새 버전을 등록해서 한다. INACTIVE에서 돌아오는
+    전이는 없다.
+
+    색인 결과를 확정하는 메서드는 소유자를 함께 받는다. 소유권을 잃은 프로세스가
+    결과를 쓰면 복구가 이미 강등한 문서를 되살리게 된다.
     """
 
     def initialize(self) -> None: ...
@@ -51,15 +56,17 @@ class DocumentRepository(Protocol):
 
     def heartbeat(self, document_id: str, owner_id: str, lease_seconds: int) -> None: ...
 
-    def mark_ready(self, document_id: str, chunk_count: int) -> None: ...
+    def mark_ready(self, document_id: str, owner_id: str, chunk_count: int) -> None: ...
 
-    def mark_index_failed(self, document_id: str, error_message: str) -> None: ...
+    def mark_index_failed(
+        self, document_id: str, owner_id: str, error_message: str
+    ) -> None: ...
 
     def activate(self, document_id: str) -> None: ...
 
     def active_document_ids(self) -> list[str]: ...
 
-    def recover_stale_indexing(self, stale_after_seconds: int) -> list[str]: ...
+    def recover_abandoned_indexing(self, owner_id: str | None = None) -> list[str]: ...
 
 
 class PdfParser(Protocol):
@@ -128,7 +135,7 @@ class VectorStore(Protocol):
 
     IndexRun의 값들은 청크마다 같지만 payload에 복제한다. 문서 계열이나 종류로
     검색을 좁히려면 벡터 저장소가 그 값을 알아야 하고, 모르면 검색 결과마다
-    문서 장부를 다시 조회하게 된다.
+    SQLite를 다시 조회하게 된다.
     """
 
     def upsert(
