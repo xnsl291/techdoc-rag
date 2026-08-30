@@ -13,13 +13,25 @@ llm:
   thinking_enabled: false
   runtime_context_tokens: 8192      # [미확정, 시작점]
   generation_max_tokens: 512        # [미확정, 시작점] 허용 응답시간이 정해지면 역산한다
+  # 동시 생성 수(DP-51). 1은 CPU 환경을 전제한 값이고 측정으로 확인하지 않았다.
+  # GPU를 확보하거나 추론 서버를 분리하면 올린다.
+  max_concurrent_generations: 1
+  # 앞의 것은 순서를 기다리는 상한, 뒤의 것은 생성 자체의 상한이다.
+  # [미확정, 시작점] 4B가 8 tok/s라 512토큰이면 64초쯤 걸린다.
+  queue_timeout_seconds: 120
+  generation_timeout_seconds: 300
 
 embedding:
   # 2026-08-30 실측으로 정한 baseline (DP-49). 이 장비에서 0.64 chunk/s, 질의 87ms.
   # 최종 확정이 아니라 색인을 시작하기 위한 값이며 평가셋 확보 후 재검토한다.
   model_name: "bge-m3"
-  # Ollama가 태그의 8192가 아니라 4096으로 로드한다. 청크를 키우면 여기가 상한이 된다.
-  runtime_context_tokens: 4096
+  # 실효 상한은 컨텍스트 길이가 아니라 배치 크기다. Ollama는 num_ctx가 8192여도
+  # num_batch(기본 2048)에서 자른다. 이 값을 num_batch로 넘기고 max_input_tokens로 쓴다.
+  # 현재 청크 최대가 782토큰이라 2048에 여유가 있다.
+  max_input_tokens: 2048
+  # 한 번의 embed_documents 호출에 넘길 청크 수. 호출자가 이 크기로 나눠 부른다.
+  # 0.64 chunk/s이므로 128개면 약 200초다. 리스 300초 안에 들어온다.
+  batch_size: 128
 
 chunking:
   # 크기 단위는 토큰이 아니라 문자 수다. 토큰을 세려면 토크나이저가 필요한데
