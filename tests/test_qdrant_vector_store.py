@@ -15,12 +15,14 @@ import pytest
 from qdrant_client import QdrantClient
 
 from techdoc_rag.adapters.qdrant_vector_store import (
+    PAYLOAD_FIELDS,
     POINT_ID_NAMESPACE,
     UPSERT_BATCH_SIZE,
     QdrantVectorStore,
 )
 from techdoc_rag.domain.chunk import Chunk
 from techdoc_rag.domain.errors import IndexingError, RetrievalError
+from techdoc_rag.domain.indexing import IndexRun
 
 VECTOR_SIZE = 4
 
@@ -41,6 +43,14 @@ def _vector(seed: float) -> list[float]:
     return [seed, 0.0, 0.0, 0.0]
 
 
+def _index_run(logical_document_id: str = "ls-g100") -> IndexRun:
+    return IndexRun(
+        logical_document_id=logical_document_id,
+        document_type="manual",
+        index_run_id="run-0001",
+    )
+
+
 @pytest.fixture
 def client() -> QdrantClient:
     return QdrantClient(location=":memory:")
@@ -57,7 +67,7 @@ def store(client: QdrantClient) -> QdrantVectorStore:
 
 def test_upsert_후_검색으로_찾을_수_있다(store: QdrantVectorStore) -> None:
     chunk = _chunk("doc-a:0001")
-    store.upsert([chunk], [_vector(1.0)])
+    store.upsert([chunk], [_vector(1.0)], _index_run())
 
     results = store.search(_vector(1.0), top_k=5, active_document_ids=["doc-a"])
 
@@ -73,15 +83,15 @@ def test_upsert_후_검색으로_찾을_수_있다(store: QdrantVectorStore) -> 
 def test_같은_청크를_두_번_넣어도_늘지_않는다(store: QdrantVectorStore) -> None:
     """FR-004. 포인트 ID가 chunk_id에서 결정론적으로 나오므로 재실행은 덮어쓰기가 된다."""
     chunk = _chunk("doc-a:0001")
-    store.upsert([chunk], [_vector(1.0)])
-    store.upsert([chunk], [_vector(1.0)])
+    store.upsert([chunk], [_vector(1.0)], _index_run())
+    store.upsert([chunk], [_vector(1.0)], _index_run())
 
     assert store.count() == 1
 
 
 def test_같은_chunk_id로_본문이_바뀌면_덮어쓴다(store: QdrantVectorStore) -> None:
     original = _chunk("doc-a:0001")
-    store.upsert([original], [_vector(1.0)])
+    store.upsert([original], [_vector(1.0)], _index_run())
 
     revised = Chunk(
         chunk_id=original.chunk_id,
@@ -92,7 +102,7 @@ def test_같은_chunk_id로_본문이_바뀌면_덮어쓴다(store: QdrantVector
         text="고친 본문",
         section=None,
     )
-    store.upsert([revised], [_vector(1.0)])
+    store.upsert([revised], [_vector(1.0)], _index_run())
 
     results = store.search(_vector(1.0), top_k=5, active_document_ids=["doc-a"])
     assert store.count() == 1
@@ -102,8 +112,8 @@ def test_같은_chunk_id로_본문이_바뀌면_덮어쓴다(store: QdrantVector
 
 
 def test_active_목록에_없는_문서는_검색되지_않는다(store: QdrantVectorStore) -> None:
-    store.upsert([_chunk("doc-a:0001", document_id="doc-a")], [_vector(1.0)])
-    store.upsert([_chunk("doc-b:0001", document_id="doc-b")], [_vector(1.0)])
+    store.upsert([_chunk("doc-a:0001", document_id="doc-a")], [_vector(1.0)], _index_run())
+    store.upsert([_chunk("doc-b:0001", document_id="doc-b")], [_vector(1.0)], _index_run())
 
     results = store.search(_vector(1.0), top_k=10, active_document_ids=["doc-a"])
 
@@ -112,14 +122,14 @@ def test_active_목록에_없는_문서는_검색되지_않는다(store: QdrantV
 
 def test_active_목록이_비면_빈_결과를_돌려준다(store: QdrantVectorStore) -> None:
     """빈 필터로 질의하면 전체가 조회된다. 그 상황을 막으려고 둔 테스트다."""
-    store.upsert([_chunk("doc-a:0001")], [_vector(1.0)])
+    store.upsert([_chunk("doc-a:0001")], [_vector(1.0)], _index_run())
 
     assert store.search(_vector(1.0), top_k=10, active_document_ids=[]) == []
 
 
 def test_delete_document는_다른_문서를_건드리지_않는다(store: QdrantVectorStore) -> None:
-    store.upsert([_chunk("doc-a:0001", document_id="doc-a")], [_vector(1.0)])
-    store.upsert([_chunk("doc-b:0001", document_id="doc-b")], [_vector(1.0)])
+    store.upsert([_chunk("doc-a:0001", document_id="doc-a")], [_vector(1.0)], _index_run())
+    store.upsert([_chunk("doc-b:0001", document_id="doc-b")], [_vector(1.0)], _index_run())
 
     store.delete_document("doc-a")
 
@@ -129,25 +139,25 @@ def test_delete_document는_다른_문서를_건드리지_않는다(store: Qdran
 
 
 def test_없는_문서를_지워도_오류가_아니다(store: QdrantVectorStore) -> None:
-    store.upsert([_chunk("doc-a:0001")], [_vector(1.0)])
+    store.upsert([_chunk("doc-a:0001")], [_vector(1.0)], _index_run())
     store.delete_document("doc-none")
     assert store.count() == 1
 
 
 def test_빈_청크_목록은_아무_일도_하지_않는다(store: QdrantVectorStore) -> None:
-    store.upsert([], [])
+    store.upsert([], [], _index_run())
     assert store.count() == 0
 
 
 def test_청크와_벡터_개수가_다르면_거부한다(store: QdrantVectorStore) -> None:
     with pytest.raises(IndexingError):
-        store.upsert([_chunk("doc-a:0001")], [])
+        store.upsert([_chunk("doc-a:0001")], [], _index_run())
 
 
 def test_벡터_차원이_맞지_않으면_IndexingError(store: QdrantVectorStore) -> None:
     """어댑터가 직접 막는다. 백엔드에 맡기면 로컬과 서버가 서로 다른 예외를 던진다."""
     with pytest.raises(IndexingError) as error:
-        store.upsert([_chunk("doc-a:0001")], [[1.0, 2.0]])
+        store.upsert([_chunk("doc-a:0001")], [[1.0, 2.0]], _index_run())
 
     assert "doc-a:0001" in str(error.value)
     assert store.count() == 0
@@ -159,13 +169,14 @@ def test_차원이_틀린_벡터는_앞의_청크도_저장하지_않는다(stor
         store.upsert(
             [_chunk("doc-a:0001"), _chunk("doc-a:0002")],
             [_vector(1.0), [1.0, 2.0]],
+            _index_run(),
         )
 
     assert store.count() == 0
 
 
 def test_질의_벡터_차원이_다르면_RetrievalError(store: QdrantVectorStore) -> None:
-    store.upsert([_chunk("doc-a:0001")], [_vector(1.0)])
+    store.upsert([_chunk("doc-a:0001")], [_vector(1.0)], _index_run())
 
     with pytest.raises(RetrievalError):
         store.search([1.0, 2.0], top_k=5, active_document_ids=["doc-a"])
@@ -175,14 +186,14 @@ def test_배치_크기를_넘겨도_전부_저장된다(store: QdrantVectorStore
     """실물은 2,454청크다. 한 요청에 다 담으면 서버가 거부한다."""
     count = UPSERT_BATCH_SIZE * 2 + 5
     chunks = [_chunk(f"doc-a:{index:04d}", page_start=index + 1) for index in range(count)]
-    store.upsert(chunks, [_vector(1.0) for _ in range(count)])
+    store.upsert(chunks, [_vector(1.0) for _ in range(count)], _index_run())
 
     assert store.count() == count
 
 
 def test_top_k만큼만_돌려준다(store: QdrantVectorStore) -> None:
     chunks = [_chunk(f"doc-a:{index:04d}", page_start=index + 1) for index in range(5)]
-    store.upsert(chunks, [_vector(1.0 - index * 0.1) for index in range(5)])
+    store.upsert(chunks, [_vector(1.0 - index * 0.1) for index in range(5)], _index_run())
 
     results = store.search(_vector(1.0), top_k=2, active_document_ids=["doc-a"])
 
@@ -206,7 +217,7 @@ def test_컬렉션이_없으면_검색은_RetrievalError() -> None:
 
 
 def test_initialize는_여러_번_불러도_안전하다(store: QdrantVectorStore) -> None:
-    store.upsert([_chunk("doc-a:0001")], [_vector(1.0)])
+    store.upsert([_chunk("doc-a:0001")], [_vector(1.0)], _index_run())
     store.initialize()
     assert store.count() == 1
 
@@ -223,28 +234,39 @@ def test_기존_컬렉션의_벡터_차원이_다르면_거부한다() -> None:
     assert "재색인" in str(error.value)
 
 
-def test_payload에_is_active가_들어가지_않는다(
-    store: QdrantVectorStore, client: QdrantClient
-) -> None:
-    """활성 여부의 정본은 SQLite다. 양쪽에 두면 전환 시점에 서로 어긋난다.
-
-    키 집합을 통째로 단정한다. 필드가 하나라도 늘거나 빠지면 여기서 깨져야 한다.
-    """
-    store.upsert([_chunk("doc-a:0001")], [_vector(1.0)])
-
+def _stored_payload(store: QdrantVectorStore, client: QdrantClient) -> dict:
+    store.upsert([_chunk("doc-a:0001")], [_vector(1.0)], _index_run())
     points, _ = client.scroll(
         collection_name="test", limit=1, with_payload=True, with_vectors=False
     )
+    return points[0].payload
 
-    assert set(points[0].payload) == {
-        "chunk_id",
-        "document_id",
-        "document_version",
-        "page_start",
-        "page_end",
-        "text",
-        "section",
-    }
+
+def test_payload에_is_active가_들어가지_않는다(
+    store: QdrantVectorStore, client: QdrantClient
+) -> None:
+    """활성 여부의 정본은 SQLite다. 양쪽에 두면 전환 시점에 서로 어긋난다(CR-04)."""
+    assert "is_active" not in _stored_payload(store, client)
+
+
+def test_payload에_필수_필드가_전부_들어간다(
+    store: QdrantVectorStore, client: QdrantClient
+) -> None:
+    """필드를 빼먹으면 깨진다. 늘리는 것은 막지 않는다 — 스키마를 동결하면
+    나중에 필요한 필드를 추가할 때 테스트부터 고쳐야 한다.
+    """
+    assert set(PAYLOAD_FIELDS) <= set(_stored_payload(store, client))
+
+
+def test_payload에_색인_실행_정보가_복제된다(
+    store: QdrantVectorStore, client: QdrantClient
+) -> None:
+    """문서 계열이나 종류로 검색을 좁히려면 벡터 저장소가 그 값을 알아야 한다."""
+    payload = _stored_payload(store, client)
+
+    assert payload["logical_document_id"] == "ls-g100"
+    assert payload["document_type"] == "manual"
+    assert payload["index_run_id"] == "run-0001"
 
 
 def test_포인트_ID_생성_규칙이_바뀌지_않는다() -> None:
@@ -260,7 +282,11 @@ def test_포인트_ID_생성_규칙이_바뀌지_않는다() -> None:
 
 def test_검색_결과는_유사도_내림차순이다(store: QdrantVectorStore) -> None:
     chunks = [_chunk(f"doc-a:{index:04d}", page_start=index + 1) for index in range(3)]
-    store.upsert(chunks, [[1.0, 0.0, 0.0, 0.0], [0.9, 0.4, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
+    store.upsert(
+        chunks,
+        [[1.0, 0.0, 0.0, 0.0], [0.9, 0.4, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+        _index_run(),
+    )
 
     results = store.search([1.0, 0.0, 0.0, 0.0], top_k=3, active_document_ids=["doc-a"])
 
