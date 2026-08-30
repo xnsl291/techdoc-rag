@@ -17,7 +17,7 @@ Vector Store 필터로 넘긴다.
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from techdoc_rag.domain.document import Document, DocumentStatus
@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS documents (
     attempt_count        INTEGER NOT NULL DEFAULT 0,
     last_error           TEXT,
     chunk_count          INTEGER,
+    -- 누가 이 문서를 색인 중인지. 없으면 두 번째 프로세스가 살아 있는 색인을
+    -- 죽은 것으로 보고 강등시킨다.
+    owner_id             TEXT,
+    lease_until          TEXT,
+    -- 파싱 결과. 색인이 끝나면 메모리에서 사라지므로 여기 남긴다(FR-002).
+    failed_page_count    INTEGER,
+    pages_without_text_layer INTEGER,
     UNIQUE (logical_document_id, document_version),
     UNIQUE (logical_document_id, sha256)
 );
@@ -147,24 +154,91 @@ class SqliteDocumentRepository:
         ).fetchone()
         return _to_document(row) if row else None
 
-    def mark_indexing(self, document_id: str) -> None:
-        now = _now_iso()
+    def find_sha256_across_series(self, sha256: str) -> list[Document]:
+        """계열을 가리지 않고 같은 해시를 가진 문서를 찾는다.
+
+        중복 등록은 UNIQUE (logical_document_id, sha256)이 계열 안에서만 막는다.
+        계열 ID에 오타가 나면 같은 파일이 다른 계열로 들어가고, 둘 다 활성이 되어
+        같은 근거가 두 번 검색된다.
+
+        여기서 막지 않고 알리기만 한다. 같은 PDF가 두 제품에 공용으로 쓰이는
+        정당한 경우가 있어서, 등록을 거부할지는 색인 서비스가 정한다.
+        """
+        rows = self._connection.execute(
+            "SELECT * FROM documents WHERE sha256 = ? ORDER BY logical_document_id",
+            (sha256,),
+        ).fetchall()
+        return [_to_document(row) for row in rows]
+
+    def record_parse_result(
+        self, document_id: str, failed_page_count: int, pages_without_text_layer: int
+    ) -> None:
+        """파싱 결과를 남긴다. 이 값들은 색인이 끝나면 메모리에서 사라진다(FR-002)."""
+        self._update_status(
+            document_id,
+            """
+            UPDATE documents
+               SET failed_page_count = ?, pages_without_text_layer = ?
+             WHERE document_id = ?
+            """,
+            (failed_page_count, pages_without_text_layer, document_id),
+        )
+
+    def mark_indexing(self, document_id: str, owner_id: str, lease_seconds: int) -> None:
+        """색인 시작을 기록하고 소유권을 잡는다.
+
+        NEW와 INDEX_FAILED에서만 들어올 수 있다. READY 문서를 제자리에서 다시
+        색인하면 is_active가 1인 채로 검색에서 빠지므로 막는다(DP-50).
+        재색인은 항상 새 버전을 등록해서 한다.
+
+        owner_id는 이 색인을 잡은 프로세스를 가리킨다. 없으면 다른 프로세스가
+        살아 있는 색인을 죽은 것으로 보고 강등시킬 수 있다.
+        """
+        now = datetime.now(UTC)
         self._update_status(
             document_id,
             """
             UPDATE documents
                SET status = ?, indexing_started_at = ?, heartbeat_at = ?,
+                   owner_id = ?, lease_until = ?,
                    attempt_count = attempt_count + 1, last_error = NULL
-             WHERE document_id = ?
+             WHERE document_id = ? AND status IN (?, ?)
             """,
-            (DocumentStatus.INDEXING.value, now, now, document_id),
+            (
+                DocumentStatus.INDEXING.value,
+                now.isoformat(),
+                now.isoformat(),
+                owner_id,
+                (now + timedelta(seconds=lease_seconds)).isoformat(),
+                document_id,
+                DocumentStatus.NEW.value,
+                DocumentStatus.INDEX_FAILED.value,
+            ),
+            failure_hint="NEW 또는 INDEX_FAILED 상태에서만 색인을 시작할 수 있음. "
+            "이미 색인된 문서를 다시 색인하려면 새 버전으로 등록할 것 (DP-50)",
         )
 
-    def heartbeat(self, document_id: str) -> None:
+    def heartbeat(self, document_id: str, owner_id: str, lease_seconds: int) -> None:
+        """살아 있음을 알리고 리스를 연장한다.
+
+        소유자가 아니면 갱신되지 않는다. 이미 다른 프로세스에 넘어간 문서를
+        계속 갱신하면 두 프로세스가 같은 문서를 색인하게 된다.
+        """
+        now = datetime.now(UTC)
         self._update_status(
             document_id,
-            "UPDATE documents SET heartbeat_at = ? WHERE document_id = ? AND status = ?",
-            (_now_iso(), document_id, DocumentStatus.INDEXING.value),
+            """
+            UPDATE documents SET heartbeat_at = ?, lease_until = ?
+             WHERE document_id = ? AND status = ? AND owner_id = ?
+            """,
+            (
+                now.isoformat(),
+                (now + timedelta(seconds=lease_seconds)).isoformat(),
+                document_id,
+                DocumentStatus.INDEXING.value,
+                owner_id,
+            ),
+            failure_hint="색인 중이 아니거나 소유자가 아님",
         )
 
     def mark_ready(self, document_id: str, chunk_count: int) -> None:
@@ -231,23 +305,39 @@ class SqliteDocumentRepository:
         return [row["document_id"] for row in rows]
 
     def recover_stale_indexing(self, stale_after_seconds: int) -> list[str]:
-        """heartbeat이 끊긴 INDEXING 문서를 INDEX_FAILED로 강등한다.
+        """리스가 만료된 INDEXING 문서를 INDEX_FAILED로 강등한다.
 
         INDEXING에서 나가는 전이는 원래 프로세스가 살아 있어야 기록되므로,
         죽은 프로세스가 남긴 문서는 이 복구가 없으면 영구 고착된다(CR-02).
         기동 시 한 번 호출한다.
+
+        판정 기준은 리스다. 살아 있는 프로세스는 heartbeat으로 리스를 계속
+        연장하므로, 리스가 만료됐다는 것은 그 프로세스가 멈췄다는 뜻이다.
+        리스 없이 기록된 옛 행만 stale_after_seconds로 판정한다.
         """
-        cutoff = datetime.now(UTC).timestamp() - stale_after_seconds
-        cutoff_iso = datetime.fromtimestamp(cutoff, UTC).isoformat()
+        now_iso = _now_iso()
+        cutoff = datetime.now(UTC) - timedelta(seconds=stale_after_seconds)
+        cutoff_iso = cutoff.isoformat()
         try:
             rows = self._connection.execute(
                 """
                 UPDATE documents
-                   SET status = ?, last_error = 'stale heartbeat: 색인 중 프로세스 중단으로 판정'
-                 WHERE status = ? AND (heartbeat_at IS NULL OR heartbeat_at < ?)
+                   SET status = ?,
+                       last_error = 'stale lease: 색인 중 프로세스 중단으로 판정',
+                       owner_id = NULL, lease_until = NULL
+                 WHERE status = ?
+                   AND (
+                        (lease_until IS NOT NULL AND lease_until < ?)
+                     OR (lease_until IS NULL AND (heartbeat_at IS NULL OR heartbeat_at < ?))
+                   )
                 RETURNING document_id
                 """,
-                (DocumentStatus.INDEX_FAILED.value, DocumentStatus.INDEXING.value, cutoff_iso),
+                (
+                    DocumentStatus.INDEX_FAILED.value,
+                    DocumentStatus.INDEXING.value,
+                    now_iso,
+                    cutoff_iso,
+                ),
             ).fetchall()
             self._connection.commit()
             return [row["document_id"] for row in rows]
@@ -255,12 +345,14 @@ class SqliteDocumentRepository:
             self._connection.rollback()
             raise MetadataStoreError(f"stale INDEXING 복구 실패: {exc}") from exc
 
-    def _update_status(self, document_id: str, sql: str, parameters: tuple) -> None:
+    def _update_status(
+        self, document_id: str, sql: str, parameters: tuple, failure_hint: str = "대상 없음"
+    ) -> None:
         try:
             cursor = self._connection.execute(sql, parameters)
             if cursor.rowcount == 0:
                 self._connection.rollback()
-                raise MetadataStoreError(f"상태 갱신 실패: 대상 없음 ({document_id})")
+                raise MetadataStoreError(f"상태 갱신 실패: {document_id} — {failure_hint}")
             self._connection.commit()
         except sqlite3.Error as exc:
             self._connection.rollback()

@@ -77,14 +77,14 @@ def test_다른_계열이면_같은_해시도_허용된다(repository: SqliteDoc
 def test_색인_생명주기와_활성_전환(repository: SqliteDocumentRepository) -> None:
     # v1을 READY+active로 만든다.
     repository.register(_document(document_id="v1", document_version=1, sha256="a" * 64))
-    repository.mark_indexing("v1")
+    repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
     repository.mark_ready("v1", chunk_count=100)
     repository.activate("v1")
     assert repository.active_document_ids() == ["v1"]
 
     # v2가 READY가 된 뒤 활성 전환하면 v1이 내려간다.
     repository.register(_document(document_id="v2", document_version=2, sha256="b" * 64))
-    repository.mark_indexing("v2")
+    repository.mark_indexing("v2", owner_id="worker-1", lease_seconds=300)
     repository.mark_ready("v2", chunk_count=105)
     repository.activate("v2")
 
@@ -104,7 +104,7 @@ def test_active_2개는_DB_제약이_거부한다(
     partial unique index는 경로와 무관하게 거부한다(CR-03).
     """
     repository.register(_document(document_id="v1", document_version=1, sha256="a" * 64))
-    repository.mark_indexing("v1")
+    repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
     repository.mark_ready("v1", chunk_count=1)
     repository.activate("v1")
     repository.register(_document(document_id="v2", document_version=2, sha256="b" * 64))
@@ -121,12 +121,12 @@ def test_READY가_아니면_활성_전환이_거부되고_기존_active가_유�
     repository: SqliteDocumentRepository,
 ) -> None:
     repository.register(_document(document_id="v1", document_version=1, sha256="a" * 64))
-    repository.mark_indexing("v1")
+    repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
     repository.mark_ready("v1", chunk_count=1)
     repository.activate("v1")
     # v2는 INDEXING 상태에서 활성 전환을 시도한다.
     repository.register(_document(document_id="v2", document_version=2, sha256="b" * 64))
-    repository.mark_indexing("v2")
+    repository.mark_indexing("v2", owner_id="worker-1", lease_seconds=300)
 
     with pytest.raises(MetadataStoreError):
         repository.activate("v2")
@@ -135,11 +135,11 @@ def test_READY가_아니면_활성_전환이_거부되고_기존_active가_유�
     assert repository.active_document_ids() == ["v1"]
 
 
-def test_heartbeat이_끊긴_INDEXING은_복구에서_강등된다(
+def test_리스가_만료된_INDEXING은_복구에서_강등된다(
     repository: SqliteDocumentRepository, tmp_path: Path
 ) -> None:
     repository.register(_document(document_id="stale", sha256="a" * 64))
-    repository.mark_indexing("stale")
+    repository.mark_indexing("stale", owner_id="dead-worker", lease_seconds=300)
     repository.register(
         _document(
             document_id="alive",
@@ -147,12 +147,13 @@ def test_heartbeat이_끊긴_INDEXING은_복구에서_강등된다(
             sha256="b" * 64,
         )
     )
-    repository.mark_indexing("alive")
+    repository.mark_indexing("alive", owner_id="live-worker", lease_seconds=300)
 
-    # stale의 heartbeat을 과거로 되돌린다.
+    # 프로세스가 죽어 리스가 만료된 상황을 만든다.
     raw_connection = sqlite3.connect(tmp_path / "metadata.db")
     raw_connection.execute(
-        "UPDATE documents SET heartbeat_at = '2020-01-01T00:00:00+00:00'"
+        "UPDATE documents SET heartbeat_at = '2020-01-01T00:00:00+00:00',"
+        " lease_until = '2020-01-01T00:05:00+00:00'"
         " WHERE document_id = 'stale'"
     )
     raw_connection.commit()
@@ -171,7 +172,7 @@ def test_heartbeat이_끊긴_INDEXING은_복구에서_강등된다(
 
 def test_없는_문서의_상태_갱신은_실패한다(repository: SqliteDocumentRepository) -> None:
     with pytest.raises(MetadataStoreError):
-        repository.mark_indexing("ghost")
+        repository.mark_indexing("ghost", owner_id="worker-1", lease_seconds=300)
 
 
 def test_WAL_모드로_동작한다(repository: SqliteDocumentRepository, tmp_path: Path) -> None:
@@ -186,9 +187,9 @@ def test_재색인_시도마다_attempt_count가_올라간다(
     repository: SqliteDocumentRepository, tmp_path: Path
 ) -> None:
     repository.register(_document(document_id="doc-1"))
-    repository.mark_indexing("doc-1")
+    repository.mark_indexing("doc-1", owner_id="worker-1", lease_seconds=300)
     repository.mark_index_failed("doc-1", "첫 실패")
-    repository.mark_indexing("doc-1")
+    repository.mark_indexing("doc-1", owner_id="worker-1", lease_seconds=300)
 
     raw_connection = sqlite3.connect(tmp_path / "metadata.db")
     count = raw_connection.execute(
@@ -197,3 +198,105 @@ def test_재색인_시도마다_attempt_count가_올라간다(
     raw_connection.close()
 
     assert count == 2
+
+
+def test_READY_문서는_제자리_재색인이_거부된다(
+    repository: SqliteDocumentRepository,
+) -> None:
+    """DP-50. 제자리 재색인은 is_active가 1인 채로 검색에서 빠지게 만든다."""
+    repository.register(_document(document_id="v1"))
+    repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
+    repository.mark_ready("v1", chunk_count=5)
+
+    with pytest.raises(MetadataStoreError) as error:
+        repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
+
+    assert "새 버전" in str(error.value)
+    document = repository.get("v1")
+    assert document is not None
+    assert document.status is DocumentStatus.READY
+
+
+def test_실패한_문서는_다시_색인할_수_있다(repository: SqliteDocumentRepository) -> None:
+    repository.register(_document(document_id="v1"))
+    repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
+    repository.mark_index_failed("v1", "파싱 실패")
+
+    repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
+
+    document = repository.get("v1")
+    assert document is not None
+    assert document.status is DocumentStatus.INDEXING
+
+
+def test_소유자가_아니면_heartbeat이_거부된다(repository: SqliteDocumentRepository) -> None:
+    """다른 프로세스에 넘어간 문서를 계속 갱신하면 둘이 같은 문서를 색인하게 된다."""
+    repository.register(_document(document_id="v1"))
+    repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
+
+    with pytest.raises(MetadataStoreError):
+        repository.heartbeat("v1", owner_id="worker-2", lease_seconds=300)
+
+    repository.heartbeat("v1", owner_id="worker-1", lease_seconds=300)
+
+
+def test_리스가_살아있으면_복구가_건드리지_않는다(
+    repository: SqliteDocumentRepository, tmp_path: Path
+) -> None:
+    """heartbeat이 오래됐어도 리스가 남아 있으면 살아 있는 색인으로 본다.
+
+    임베딩 배치 하나가 오래 걸릴 때 살아 있는 프로세스를 죽었다고 오판하지 않게 한다.
+    """
+    repository.register(_document(document_id="v1"))
+    repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=3600)
+
+    raw_connection = sqlite3.connect(tmp_path / "metadata.db")
+    raw_connection.execute(
+        "UPDATE documents SET heartbeat_at = '2020-01-01T00:00:00+00:00'"
+        " WHERE document_id = 'v1'"
+    )
+    raw_connection.commit()
+    raw_connection.close()
+
+    assert repository.recover_stale_indexing(stale_after_seconds=1) == []
+
+
+def test_계열이_달라도_같은_해시를_찾을_수_있다(
+    repository: SqliteDocumentRepository,
+) -> None:
+    """계열 ID 오타로 같은 파일이 두 번 등록되면 같은 근거가 두 번 검색된다.
+
+    막지는 않는다. 같은 PDF가 두 제품에 공용으로 쓰이는 경우가 있어
+    등록을 거부할지는 색인 서비스가 정한다.
+    """
+    same_hash = "c" * 64
+    repository.register(_document(document_id="v1", sha256=same_hash))
+    repository.register(
+        _document(
+            document_id="typo",
+            logical_document_id="manual-g100-typo",
+            sha256=same_hash,
+        )
+    )
+
+    found = repository.find_sha256_across_series(same_hash)
+
+    assert [document.document_id for document in found] == ["v1", "typo"]
+    assert repository.find_sha256_across_series("d" * 64) == []
+
+
+def test_파싱_결과가_색인_후에도_남는다(
+    repository: SqliteDocumentRepository, tmp_path: Path
+) -> None:
+    """FR-002. 파싱 직후 메모리에만 있으면 색인이 끝나고 나서 확인할 방법이 없다."""
+    repository.register(_document(document_id="v1"))
+    repository.record_parse_result("v1", failed_page_count=2, pages_without_text_layer=18)
+
+    raw_connection = sqlite3.connect(tmp_path / "metadata.db")
+    row = raw_connection.execute(
+        "SELECT failed_page_count, pages_without_text_layer FROM documents"
+        " WHERE document_id = 'v1'"
+    ).fetchone()
+    raw_connection.close()
+
+    assert row == (2, 18)
