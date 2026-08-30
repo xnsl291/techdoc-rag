@@ -15,6 +15,7 @@ from typing import Protocol
 
 from techdoc_rag.domain.chunk import Chunk, RetrievedChunk
 from techdoc_rag.domain.document import Document
+from techdoc_rag.domain.indexing import IndexRun
 from techdoc_rag.domain.parsing import ParsedDocument
 
 
@@ -112,11 +113,21 @@ class EmbeddingModel(Protocol):
 class VectorStore(Protocol):
     """청크 벡터를 저장하고 검색한다.
 
-    upsert는 document_id와 chunk_id로 결정론적 ID를 만들어 재실행해도
-    중복 벡터가 생기지 않아야 한다.
+    upsert는 chunk_id로 결정론적 ID를 만들어 재실행해도 중복 벡터가 생기지 않아야 한다.
+    chunk_id는 전역에서 유일해야 한다. 지금은 청커가 document_id를 접두어로 붙여
+    그 조건이 성립한다.
+
+    IndexRun의 값들은 청크마다 같지만 payload에 복제한다. 문서 계열이나 종류로
+    검색을 좁히려면 벡터 저장소가 그 값을 알아야 하고, 모르면 검색 결과마다
+    문서 장부를 다시 조회하게 된다.
     """
 
-    def upsert(self, chunks: Sequence[Chunk], vectors: Sequence[Sequence[float]]) -> None: ...
+    def upsert(
+        self,
+        chunks: Sequence[Chunk],
+        vectors: Sequence[Sequence[float]],
+        index_run: IndexRun,
+    ) -> None: ...
 
     def search(
         self,
