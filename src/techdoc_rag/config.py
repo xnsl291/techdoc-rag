@@ -27,12 +27,16 @@ class LlmSettings:
     runtime_context_tokens: int
     generation_max_tokens: int
     endpoint: str
+    max_concurrent_generations: int
+    queue_timeout_seconds: int
+    generation_timeout_seconds: int
 
 
 @dataclass(frozen=True, slots=True)
 class EmbeddingSettings:
     model_name: str
-    runtime_context_tokens: int
+    max_input_tokens: int
+    batch_size: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +113,13 @@ def load_settings(settings_path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
             host=os.getenv("OLLAMA_HOST", "127.0.0.1"),
             port=os.getenv("OLLAMA_PORT", "11434"),
         ),
+        max_concurrent_generations=int(
+            _require(llm_section, "max_concurrent_generations", "llm")
+        ),
+        queue_timeout_seconds=int(_require(llm_section, "queue_timeout_seconds", "llm")),
+        generation_timeout_seconds=int(
+            _require(llm_section, "generation_timeout_seconds", "llm")
+        ),
     )
 
     embedding_section = raw.get("embedding", {})
@@ -121,9 +132,8 @@ def load_settings(settings_path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
         llm=llm,
         embedding=EmbeddingSettings(
             model_name=_require(embedding_section, "model_name", "embedding"),
-            runtime_context_tokens=int(
-                _require(embedding_section, "runtime_context_tokens", "embedding")
-            ),
+            max_input_tokens=int(_require(embedding_section, "max_input_tokens", "embedding")),
+            batch_size=int(_require(embedding_section, "batch_size", "embedding")),
         ),
         indexing=IndexingSettings(
             heartbeat_interval_seconds=int(
