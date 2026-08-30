@@ -19,15 +19,15 @@ from qdrant_client import QdrantClient, models
 
 from techdoc_rag.domain.chunk import Chunk, RetrievedChunk
 from techdoc_rag.domain.errors import IndexingError, RetrievalError
+from techdoc_rag.domain.indexing import IndexRun
 
 # 포인트 ID 생성용 고정 네임스페이스. 이 값이 바뀌면 기존 벡터를 덮어쓰지 못하고
 # 전부 새 포인트로 쌓이므로 절대 바꾸지 않는다.
 POINT_ID_NAMESPACE = uuid.UUID("6f2b1e3c-7a94-4f0d-9c1b-2d5e8a3f7b60")
 
-# payload 키. Chunk의 필드명을 그대로 쓴다. 저장소마다 이름이 달라지면
+# Chunk에서 그대로 옮기는 payload 키. 저장소마다 이름이 달라지면
 # 어느 쪽 표기가 맞는지 매번 확인해야 한다.
-# is_active는 여기 없다. 활성 여부의 정본은 SQLite다(CR-04).
-_PAYLOAD_FIELDS = (
+_CHUNK_PAYLOAD_FIELDS = (
     "chunk_id",
     "document_id",
     "document_version",
@@ -36,6 +36,13 @@ _PAYLOAD_FIELDS = (
     "text",
     "section",
 )
+
+# IndexRun에서 옮기는 키. 청크마다 같은 값이지만 검색 필터에 필요해 복제한다.
+_INDEX_RUN_PAYLOAD_FIELDS = ("logical_document_id", "document_type", "index_run_id")
+
+# payload에 들어가는 전체 키. is_active는 여기 없다.
+# 활성 여부의 정본은 SQLite이고, 양쪽에 두면 전환 시점에 서로 어긋난다(CR-04).
+PAYLOAD_FIELDS = _CHUNK_PAYLOAD_FIELDS + _INDEX_RUN_PAYLOAD_FIELDS
 
 # 한 번에 보낼 포인트 수. 실물이 6건 3,021페이지에서 2,454청크이고 본문이 1,200자 안팎이라
 # 전량을 한 요청에 담으면 수십 MB가 된다. 서버에는 요청 크기 제한이 있어 거부한다.
@@ -100,7 +107,12 @@ class QdrantVectorStore:
                 f"임베딩 모델을 바꿨다면 새 컬렉션으로 재색인할 것"
             )
 
-    def upsert(self, chunks: Sequence[Chunk], vectors: Sequence[Sequence[float]]) -> None:
+    def upsert(
+        self,
+        chunks: Sequence[Chunk],
+        vectors: Sequence[Sequence[float]],
+        index_run: IndexRun,
+    ) -> None:
         """청크와 벡터를 저장한다. 같은 chunk_id는 덮어쓴다.
 
         차원 검사를 백엔드에 맡기지 않는다. 맡기면 로컬과 서버가 서로 다른 예외를 던지고,
@@ -115,7 +127,7 @@ class QdrantVectorStore:
             models.PointStruct(
                 id=self.point_id(chunk.chunk_id),
                 vector=self._validated_vector(vector, chunk.chunk_id),
-                payload={field: getattr(chunk, field) for field in _PAYLOAD_FIELDS},
+                payload=self._payload(chunk, index_run),
             )
             for chunk, vector in zip(chunks, vectors, strict=True)
         ]
@@ -128,6 +140,14 @@ class QdrantVectorStore:
                 raise IndexingError(
                     f"벡터 저장 실패 ({start}번째부터 {len(batch)}개): {error}"
                 ) from error
+
+    @staticmethod
+    def _payload(chunk: Chunk, index_run: IndexRun) -> dict:
+        payload = {field: getattr(chunk, field) for field in _CHUNK_PAYLOAD_FIELDS}
+        payload.update(
+            {field: getattr(index_run, field) for field in _INDEX_RUN_PAYLOAD_FIELDS}
+        )
+        return payload
 
     def _validated_vector(self, vector: Sequence[float], chunk_id: str) -> list[float]:
         if len(vector) != self._vector_size:
