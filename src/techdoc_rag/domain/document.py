@@ -57,6 +57,10 @@ class Document:
     indexed_at: datetime | None = None
     deleted_at: datetime | None = None
 
+    # 파싱 결과. 색인이 끝나면 메모리에서 사라지므로 저장해 두고 여기서 읽는다(FR-002).
+    failed_page_count: int | None = None
+    pages_without_text_layer: int | None = None
+
     @property
     def is_searchable(self) -> bool:
         return self.is_active and self.status is DocumentStatus.READY

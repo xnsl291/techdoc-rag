@@ -15,6 +15,7 @@ from typing import Protocol
 
 from techdoc_rag.domain.chunk import Chunk, RetrievedChunk
 from techdoc_rag.domain.document import Document
+from techdoc_rag.domain.indexing import IndexRun
 from techdoc_rag.domain.parsing import ParsedDocument
 
 
@@ -27,6 +28,14 @@ class DocumentRepository(Protocol):
 
     활성 전환(activate)은 원자적이어야 한다. 신규 활성화와 구버전 비활성화
     사이에 중단돼도 active가 2개이거나 0개인 상태가 관측되면 안 된다(01 §17.6).
+
+    재색인은 항상 새 버전을 등록해서 한다(DP-50). 같은 document_id를 제자리에서
+    다시 색인하면 is_active가 1인 채로 검색에서 빠진다. mark_indexing이 이를 막는다.
+    이전 버전으로 되돌리는 것도 새 버전을 등록해서 한다. INACTIVE에서 돌아오는
+    전이는 없다.
+
+    색인 결과를 확정하는 메서드는 소유자를 함께 받는다. 소유권을 잃은 프로세스가
+    결과를 쓰면 복구가 이미 강등한 문서를 되살리게 된다.
     """
 
     def initialize(self) -> None: ...
@@ -37,19 +46,27 @@ class DocumentRepository(Protocol):
 
     def find_by_sha256(self, logical_document_id: str, sha256: str) -> Document | None: ...
 
-    def mark_indexing(self, document_id: str) -> None: ...
+    def find_sha256_across_series(self, sha256: str) -> list[Document]: ...
 
-    def heartbeat(self, document_id: str) -> None: ...
+    def record_parse_result(
+        self, document_id: str, failed_page_count: int, pages_without_text_layer: int
+    ) -> None: ...
 
-    def mark_ready(self, document_id: str, chunk_count: int) -> None: ...
+    def mark_indexing(self, document_id: str, owner_id: str, lease_seconds: int) -> None: ...
 
-    def mark_index_failed(self, document_id: str, error_message: str) -> None: ...
+    def heartbeat(self, document_id: str, owner_id: str, lease_seconds: int) -> None: ...
+
+    def mark_ready(self, document_id: str, owner_id: str, chunk_count: int) -> None: ...
+
+    def mark_index_failed(
+        self, document_id: str, owner_id: str, error_message: str
+    ) -> None: ...
 
     def activate(self, document_id: str) -> None: ...
 
     def active_document_ids(self) -> list[str]: ...
 
-    def recover_stale_indexing(self, stale_after_seconds: int) -> list[str]: ...
+    def recover_abandoned_indexing(self, owner_id: str | None = None) -> list[str]: ...
 
 
 class PdfParser(Protocol):
@@ -112,11 +129,21 @@ class EmbeddingModel(Protocol):
 class VectorStore(Protocol):
     """청크 벡터를 저장하고 검색한다.
 
-    upsert는 document_id와 chunk_id로 결정론적 ID를 만들어 재실행해도
-    중복 벡터가 생기지 않아야 한다.
+    upsert는 chunk_id로 결정론적 ID를 만들어 재실행해도 중복 벡터가 생기지 않아야 한다.
+    chunk_id는 전역에서 유일해야 한다. 지금은 청커가 document_id를 접두어로 붙여
+    그 조건이 성립한다.
+
+    IndexRun의 값들은 청크마다 같지만 payload에 복제한다. 문서 계열이나 종류로
+    검색을 좁히려면 벡터 저장소가 그 값을 알아야 하고, 모르면 검색 결과마다
+    SQLite를 다시 조회하게 된다.
     """
 
-    def upsert(self, chunks: Sequence[Chunk], vectors: Sequence[Sequence[float]]) -> None: ...
+    def upsert(
+        self,
+        chunks: Sequence[Chunk],
+        vectors: Sequence[Sequence[float]],
+        index_run: IndexRun,
+    ) -> None: ...
 
     def search(
         self,
