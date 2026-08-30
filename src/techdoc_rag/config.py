@@ -32,6 +32,13 @@ class LlmSettings:
 @dataclass(frozen=True, slots=True)
 class EmbeddingSettings:
     model_name: str
+    runtime_context_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class IndexingSettings:
+    heartbeat_interval_seconds: int
+    lease_seconds: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +60,8 @@ class StorageSettings:
     metadata_database_path: Path
     qdrant_endpoint: str
     qdrant_api_key: str | None
-    qdrant_collection_alias: str
+    qdrant_collection_name: str
+    qdrant_read_alias: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +69,7 @@ class Settings:
     llm: LlmSettings
     embedding: EmbeddingSettings
     chunking: ChunkingSettings
+    indexing: IndexingSettings
     retrieval: RetrievalSettings
     storage: StorageSettings
     prompt_version: str
@@ -102,6 +111,8 @@ def load_settings(settings_path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
         ),
     )
 
+    embedding_section = raw.get("embedding", {})
+    indexing_section = raw.get("indexing", {})
     chunking_section = raw.get("chunking", {})
     retrieval_section = raw.get("retrieval", {})
     storage_section = raw.get("storage", {})
@@ -109,7 +120,16 @@ def load_settings(settings_path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
     return Settings(
         llm=llm,
         embedding=EmbeddingSettings(
-            model_name=raw.get("embedding", {}).get("model_name", ""),
+            model_name=_require(embedding_section, "model_name", "embedding"),
+            runtime_context_tokens=int(
+                _require(embedding_section, "runtime_context_tokens", "embedding")
+            ),
+        ),
+        indexing=IndexingSettings(
+            heartbeat_interval_seconds=int(
+                _require(indexing_section, "heartbeat_interval_seconds", "indexing")
+            ),
+            lease_seconds=int(_require(indexing_section, "lease_seconds", "indexing")),
         ),
         chunking=ChunkingSettings(
             size_chars=int(_require(chunking_section, "size_chars", "chunking")),
@@ -131,9 +151,10 @@ def load_settings(settings_path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
                 port=os.getenv("QDRANT_PORT", "6333"),
             ),
             qdrant_api_key=os.getenv("QDRANT_API_KEY") or None,
-            qdrant_collection_alias=_require(
-                storage_section, "qdrant_collection_alias", "storage"
+            qdrant_collection_name=_require(
+                storage_section, "qdrant_collection_name", "storage"
             ),
+            qdrant_read_alias=_require(storage_section, "qdrant_read_alias", "storage"),
         ),
         prompt_version=raw.get("prompt", {}).get("version", "v1"),
     )
