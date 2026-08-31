@@ -77,7 +77,9 @@ def test_여러_스레드가_동시에_읽고_써도_오류가_없다(
     def register_family(index: int) -> None:
         repository.register(_document(f"doc-{index}", f"manual-{index}"))
         repository.mark_indexing(f"doc-{index}", owner_id=f"host-{index}", lease_seconds=300)
-        repository.mark_ready(f"doc-{index}", owner_id=f"host-{index}", chunk_count=1, **_PROVENANCE)
+        repository.mark_ready(
+            f"doc-{index}", owner_id=f"host-{index}", chunk_count=1, **_PROVENANCE
+        )
         repository.activate(f"doc-{index}")
 
     def read_repeatedly(_: int) -> None:
