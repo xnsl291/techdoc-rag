@@ -335,17 +335,34 @@ class SqliteDocumentRepository:
             failure_hint="색인 중이 아니거나 소유자가 아님",
         )
 
-    def mark_ready(self, document_id: str, owner_id: str, chunk_count: int) -> None:
-        """색인 완료를 확정한다. 소유권을 잃었으면 쓸 수 없다.
+    def mark_ready(
+        self,
+        document_id: str,
+        owner_id: str,
+        chunk_count: int,
+        *,
+        parser_version: str,
+        chunk_config_version: str,
+        embedding_model: str,
+        embedding_version: str,
+    ) -> None:
+        """색인 완료를 확정하고 어떤 설정으로 색인했는지 함께 기록한다.
 
         조건이 없으면 복구가 이미 강등한 문서를 원래 프로세스가 READY로 되돌린다.
         강등 기록과 실제 상태가 어긋나고, 소유권 없는 프로세스의 결과가 확정된다.
+
+        재현성 값(parser/chunk/embedding 버전)이 필수 인자인 것은 의도임(NFR-004).
+        READY 확정과 재현성 기록은 같은 순간의 사실이라, 별도 메서드로 쪼개면
+        호출을 빼먹은 반쪽 기록 상태가 생긴다. register 시점에는 이 값들을
+        알 수 없다 — 어떤 파서·청커·모델로 색인할지는 색인 시점에 정해진다.
         """
         self._update_status(
             document_id,
             """
             UPDATE documents
                SET status = ?, indexed_at = ?, chunk_count = ?,
+                   parser_version = ?, chunk_config_version = ?,
+                   embedding_model = ?, embedding_version = ?,
                    owner_id = NULL, lease_until = NULL
              WHERE document_id = ? AND status = ? AND owner_id = ?
             """,
@@ -353,6 +370,10 @@ class SqliteDocumentRepository:
                 DocumentStatus.READY.value,
                 _now_iso(),
                 chunk_count,
+                parser_version,
+                chunk_config_version,
+                embedding_model,
+                embedding_version,
                 document_id,
                 DocumentStatus.INDEXING.value,
                 owner_id,
