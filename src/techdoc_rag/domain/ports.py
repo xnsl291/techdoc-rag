@@ -56,7 +56,17 @@ class DocumentRepository(Protocol):
 
     def heartbeat(self, document_id: str, owner_id: str, lease_seconds: int) -> None: ...
 
-    def mark_ready(self, document_id: str, owner_id: str, chunk_count: int) -> None: ...
+    def mark_ready(
+        self,
+        document_id: str,
+        owner_id: str,
+        chunk_count: int,
+        *,
+        parser_version: str,
+        chunk_config_version: str,
+        embedding_model: str,
+        embedding_version: str,
+    ) -> None: ...
 
     def mark_index_failed(
         self, document_id: str, owner_id: str, error_message: str
