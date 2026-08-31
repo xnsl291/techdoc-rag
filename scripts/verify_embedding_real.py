@@ -62,7 +62,8 @@ def main() -> int:
 
     # 1) 차원
     vector = model.embed_query(longest.text)
-    print(f"\n[1] 실물 청크 차원: {len(vector)} (기대 1024) → {'통과' if len(vector) == 1024 else '실패'}")
+    verdict = "통과" if len(vector) == 1024 else "실패"
+    print(f"\n[1] 실물 청크 차원: {len(vector)} (기대 1024) → {verdict}")
 
     # 2) 잘림 지점 — 청크를 이어붙여 num_batch를 확실히 넘긴 뒤 접두사와 비교
     long_text = longest.text * 6  # 최장 청크가 ~780토큰이므로 6배면 ~4,700토큰
@@ -90,7 +91,10 @@ def main() -> int:
     started = time.perf_counter()
     model.embed_documents(sample)
     elapsed = time.perf_counter() - started
-    print(f"\n[3] 처리량: 32청크 {elapsed:.1f}s = {32 / elapsed:.2f} chunk/s (이 기기 값. 기기 종속)")
+    print(
+        f"\n[3] 처리량: 32청크 {elapsed:.1f}s = {32 / elapsed:.2f} chunk/s"
+        f" (이 기기 값. 기기 종속)"
+    )
     print(f"    2,454청크 환산: {2454 / (32 / elapsed) / 60:.0f}분")
     return 0
 
