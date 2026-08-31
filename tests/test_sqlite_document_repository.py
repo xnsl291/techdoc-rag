@@ -16,6 +16,14 @@ from techdoc_rag.adapters.sqlite_document_repository import SqliteDocumentReposi
 from techdoc_rag.domain.document import Document, DocumentStatus
 from techdoc_rag.domain.errors import MetadataStoreError
 
+# mark_ready의 재현성 필수 인자(NFR-004). 테스트 관심사가 아니라 공용으로 둔다.
+_PROVENANCE = {
+    "parser_version": "pypdfium2-test",
+    "chunk_config_version": "v1",
+    "embedding_model": "bge-m3",
+    "embedding_version": "v1",
+}
+
 
 def _document(
     document_id: str = "doc-1",
@@ -77,14 +85,14 @@ def test_색인_생명주기와_활성_전환(repository: SqliteDocumentReposito
     # v1을 READY+active로 만든다.
     repository.register(_document(document_id="v1", document_version=1, sha256="a" * 64))
     repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
-    repository.mark_ready("v1", owner_id="worker-1", chunk_count=100)
+    repository.mark_ready("v1", owner_id="worker-1", chunk_count=100, **_PROVENANCE)
     repository.activate("v1")
     assert repository.active_document_ids() == ["v1"]
 
     # v2가 READY가 된 뒤 활성 전환하면 v1이 내려간다.
     repository.register(_document(document_id="v2", document_version=2, sha256="b" * 64))
     repository.mark_indexing("v2", owner_id="worker-1", lease_seconds=300)
-    repository.mark_ready("v2", owner_id="worker-1", chunk_count=105)
+    repository.mark_ready("v2", owner_id="worker-1", chunk_count=105, **_PROVENANCE)
     repository.activate("v2")
 
     assert repository.active_document_ids() == ["v2"]
@@ -104,7 +112,7 @@ def test_active_2개는_DB_제약이_거부한다(
     """
     repository.register(_document(document_id="v1", document_version=1, sha256="a" * 64))
     repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
-    repository.mark_ready("v1", owner_id="worker-1", chunk_count=1)
+    repository.mark_ready("v1", owner_id="worker-1", chunk_count=1, **_PROVENANCE)
     repository.activate("v1")
     repository.register(_document(document_id="v2", document_version=2, sha256="b" * 64))
 
@@ -121,7 +129,7 @@ def test_READY가_아니면_활성_전환이_거부되고_기존_active가_유�
 ) -> None:
     repository.register(_document(document_id="v1", document_version=1, sha256="a" * 64))
     repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
-    repository.mark_ready("v1", owner_id="worker-1", chunk_count=1)
+    repository.mark_ready("v1", owner_id="worker-1", chunk_count=1, **_PROVENANCE)
     repository.activate("v1")
     # v2는 INDEXING 상태에서 활성 전환을 시도한다.
     repository.register(_document(document_id="v2", document_version=2, sha256="b" * 64))
@@ -205,7 +213,7 @@ def test_READY_문서는_제자리_재색인이_거부된다(
     """DP-50. 제자리 재색인은 is_active가 1인 채로 검색에서 빠지게 만든다."""
     repository.register(_document(document_id="v1"))
     repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
-    repository.mark_ready("v1", owner_id="worker-1", chunk_count=5)
+    repository.mark_ready("v1", owner_id="worker-1", chunk_count=5, **_PROVENANCE)
 
     with pytest.raises(MetadataStoreError) as error:
         repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
@@ -319,7 +327,7 @@ def test_소유권을_잃으면_결과를_확정할_수_없다(
     repository.recover_abandoned_indexing(owner_id="worker-1")
 
     with pytest.raises(MetadataStoreError):
-        repository.mark_ready("v1", owner_id="worker-1", chunk_count=5)
+        repository.mark_ready("v1", owner_id="worker-1", chunk_count=5, **_PROVENANCE)
 
     document = repository.get("v1")
     assert document is not None
@@ -407,7 +415,7 @@ def test_상태_갱신_실패_메시지가_원인을_구분한다(
 
     repository.register(_document(document_id="v1"))
     repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
-    repository.mark_ready("v1", owner_id="worker-1", chunk_count=1)
+    repository.mark_ready("v1", owner_id="worker-1", chunk_count=1, **_PROVENANCE)
 
     with pytest.raises(MetadataStoreError, match="현재 상태 READY"):
         repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
@@ -422,7 +430,7 @@ def test_저장된_모든_시각이_같은_형식이다(
     repository.register(_document(document_id="doc-1"))
     repository.mark_indexing("doc-1", owner_id="host-1", lease_seconds=300)
     repository.heartbeat("doc-1", owner_id="host-1", lease_seconds=300)
-    repository.mark_ready("doc-1", owner_id="host-1", chunk_count=1)
+    repository.mark_ready("doc-1", owner_id="host-1", chunk_count=1, **_PROVENANCE)
 
     pattern = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+00:00$")
     raw_connection = sqlite3.connect(tmp_path / "metadata.db")
