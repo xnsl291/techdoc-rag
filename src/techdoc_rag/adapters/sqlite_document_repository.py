@@ -84,8 +84,20 @@ _EXPECTED_COLUMNS = {
 }
 
 
+def _to_iso(moment: datetime) -> str:
+    """저장용 시각 문자열. 이 함수 외의 경로로 시각을 저장하지 않는다.
+
+    lease_until < ? 같은 비교가 전부 문자열 사전순이다. 마이크로초가 있는 값과
+    없는 값이 섞이면 `.`(0x2E) > `+`(0x2B)라 같은 초에서 순서가 뒤집힌다.
+    timespec을 고정해 모든 값의 형식을 같게 만든다.
+    """
+    if moment.tzinfo is None:
+        raise ValueError("시각은 UTC aware여야 함. datetime.now(UTC)를 쓸 것")
+    return moment.astimezone(UTC).isoformat(timespec="microseconds")
+
+
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return _to_iso(datetime.now(UTC))
 
 
 class SqliteDocumentRepository:
@@ -172,13 +184,13 @@ class SqliteDocumentRepository:
                     document.document_type,
                     document.status.value,
                     int(document.is_active),
-                    document.created_at.isoformat(),
+                    _to_iso(document.created_at),
                     document.parser_version,
                     document.chunk_config_version,
                     document.embedding_model,
                     document.embedding_version,
-                    document.indexed_at.isoformat() if document.indexed_at else None,
-                    document.deleted_at.isoformat() if document.deleted_at else None,
+                    _to_iso(document.indexed_at) if document.indexed_at else None,
+                    _to_iso(document.deleted_at) if document.deleted_at else None,
                 ),
             )
             self._connection.commit()
@@ -257,10 +269,10 @@ class SqliteDocumentRepository:
             """,
             (
                 DocumentStatus.INDEXING.value,
-                now.isoformat(),
-                now.isoformat(),
+                _to_iso(now),
+                _to_iso(now),
                 owner_id,
-                (now + timedelta(seconds=lease_seconds)).isoformat(),
+                _to_iso(now + timedelta(seconds=lease_seconds)),
                 document_id,
                 DocumentStatus.NEW.value,
                 DocumentStatus.INDEX_FAILED.value,
@@ -283,8 +295,8 @@ class SqliteDocumentRepository:
              WHERE document_id = ? AND status = ? AND owner_id = ?
             """,
             (
-                now.isoformat(),
-                (now + timedelta(seconds=lease_seconds)).isoformat(),
+                _to_iso(now),
+                _to_iso(now + timedelta(seconds=lease_seconds)),
                 document_id,
                 DocumentStatus.INDEXING.value,
                 owner_id,
