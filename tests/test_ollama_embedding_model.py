@@ -34,6 +34,14 @@ class _FakeOllamaHandler(BaseHTTPRequestHandler):
         self.server.connections.add(self.client_address[1])  # type: ignore[attr-defined]
 
         behavior = self.server.behavior  # type: ignore[attr-defined]
+        if behavior == "drop_once":
+            # 응답 없이 커넥션을 끊는다. keep-alive 만료·서버 재시작을 재현한다.
+            self.server.behavior = "ok"  # type: ignore[attr-defined]
+            self.close_connection = True
+            return
+        if behavior == "drop_always":
+            self.close_connection = True
+            return
         if behavior == "http_500":
             self._reply(500, b"boom")
             return
@@ -169,15 +177,27 @@ def test_HTTP_오류와_비JSON_응답은_IndexingError(fake_server) -> None:
         model.embed_query("비정상")
 
 
-def test_죽은_커넥션은_한_번만_재연결한다(fake_server) -> None:
+def test_서버가_끊은_커넥션은_한_번_재연결해_성공한다(fake_server) -> None:
+    """클라이언트 close()로 재현하면 http.client의 auto_open이 조용히 다시 열어
+    재시도 분기를 타지 않는다(리뷰에서 발견된 거짓 양성). 서버가 응답 없이
+    끊어야 _send_with_retry_once의 except 경로가 실제로 실행된다."""
     model = _model(fake_server)
     model.embed_query("워밍업")
 
-    # 서버 쪽에서 커넥션이 끊긴 상황을 흉내 낸다.
-    model._connection.close()  # noqa: SLF001 (커넥션 사망 재현에 내부 접근이 필요함)
+    fake_server.behavior = "drop_once"
 
     assert model.embed_query("재연결") is not None
     assert len(fake_server.connections) == 2  # 원래 1 + 재연결 1
+
+
+def test_연속으로_끊기면_IndexingError(fake_server) -> None:
+    model = _model(fake_server)
+    model.embed_query("워밍업")
+
+    fake_server.behavior = "drop_always"
+
+    with pytest.raises(IndexingError, match="접속 실패"):
+        model.embed_query("두 번 다 끊김")
 
 
 def test_localhost는_생성_시점에_거부한다() -> None:
