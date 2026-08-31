@@ -12,12 +12,18 @@ Vector Store 필터로 넘긴다.
 
 접속 설정(WAL, busy_timeout)은 Windows에서 SQLite 락킹이 깨지는 문제와
 동시 접근 대비다. 파일은 bind mount가 아니라 로컬 경로에 둬야 한다.
+
+커넥션 수명은 작업 단위다(DP-54). 인스턴스가 커넥션을 붙들지 않으므로
+FastAPI 워커 스레드 어디서 불러도 안전하고, 트랜잭션은 항상 한 작업 안에서
+시작하고 끝난다.
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -105,15 +111,34 @@ class SqliteDocumentRepository:
 
     def __init__(self, database_path: Path) -> None:
         database_path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(database_path)
-        self._connection.row_factory = sqlite3.Row
-        # WAL: 읽기와 쓰기가 서로를 덜 막음. busy_timeout: 잠금 경합 시 즉시 실패하지 않음.
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute("PRAGMA busy_timeout=5000")
-        self._connection.execute("PRAGMA foreign_keys=ON")
+        self._database_path = database_path
 
-    def close(self) -> None:
-        self._connection.close()
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """작업 단위 커넥션. 열고, 쓰고, 닫는다.
+
+        커넥션을 인스턴스에 붙들면 FastAPI 워커 스레드에서 ProgrammingError가
+        나고, check_same_thread=False로 덮으면 서로 다른 스레드의 트랜잭션이
+        한 커넥션에서 섞인다. 로컬 파일이라 여는 비용은 중앙값 1.6ms
+        (개발 장비 실측)이고, 답변 생성이 수십 초인 시스템에서 무의미한 크기다.
+        산정 근거는 DP-54.
+
+        busy_timeout과 foreign_keys는 커넥션 속성이라 매번 켠다.
+        journal_mode=WAL은 DB 파일에 저장되는 속성이라 initialize에서 한 번만 켠다.
+        """
+        try:
+            connection = sqlite3.connect(self._database_path)
+        except sqlite3.Error as exc:
+            raise MetadataStoreError(
+                f"저장소 연결 실패: {self._database_path} ({exc})"
+            ) from exc
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("PRAGMA foreign_keys=ON")
+            yield connection
+        finally:
+            connection.close()
 
     def initialize(self) -> None:
         """스키마를 만들고, 이미 있으면 기대하는 컬럼이 다 있는지 확인한다.
@@ -122,22 +147,24 @@ class SqliteDocumentRepository:
         옛 스키마로 만든 DB에 그대로 붙으면 첫 상태 갱신에서 no such column이
         SQL 오류로 감싸져 나와 원인을 알 수 없다. 여기서 끊는다.
         """
-        try:
-            self._connection.executescript(_SCHEMA)
-            self._connection.commit()
-        except sqlite3.Error as exc:
-            raise MetadataStoreError(f"스키마 생성 실패: {exc}") from exc
+        with self._connect() as connection:
+            try:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.executescript(_SCHEMA)
+                connection.commit()
+            except sqlite3.Error as exc:
+                raise MetadataStoreError(f"스키마 생성 실패: {exc}") from exc
 
-        existing = {
-            row["name"]
-            for row in self._connection.execute("PRAGMA table_info(documents)").fetchall()
-        }
-        missing = _EXPECTED_COLUMNS - existing
-        if missing:
-            raise MetadataStoreError(
-                f"documents 테이블에 컬럼이 없음: {sorted(missing)}. "
-                f"옛 스키마로 만든 DB임. 개발 중이면 파일을 지우고 다시 만들 것"
-            )
+            existing = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(documents)").fetchall()
+            }
+            missing = _EXPECTED_COLUMNS - existing
+            if missing:
+                raise MetadataStoreError(
+                    f"documents 테이블에 컬럼이 없음: {sorted(missing)}. "
+                    f"옛 스키마로 만든 DB임. 개발 중이면 파일을 지우고 다시 만들 것"
+                )
 
     def register(self, document: Document) -> None:
         """문서를 등록한다.
@@ -161,60 +188,63 @@ class SqliteDocumentRepository:
                 document.sha256[:12],
                 sorted({existing.logical_document_id for existing in duplicates}),
             )
-        try:
-            self._connection.execute(
-                """
-                INSERT INTO documents (
-                    document_id, logical_document_id, document_version,
-                    original_filename, sha256, mime_type, file_size_bytes,
-                    page_count, document_type, status, is_active, created_at,
-                    parser_version, chunk_config_version, embedding_model,
-                    embedding_version, indexed_at, deleted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    document.document_id,
-                    document.logical_document_id,
-                    document.document_version,
-                    document.original_filename,
-                    document.sha256,
-                    document.mime_type,
-                    document.file_size_bytes,
-                    document.page_count,
-                    document.document_type,
-                    document.status.value,
-                    int(document.is_active),
-                    _to_iso(document.created_at),
-                    document.parser_version,
-                    document.chunk_config_version,
-                    document.embedding_model,
-                    document.embedding_version,
-                    _to_iso(document.indexed_at) if document.indexed_at else None,
-                    _to_iso(document.deleted_at) if document.deleted_at else None,
-                ),
-            )
-            self._connection.commit()
-        except sqlite3.IntegrityError as exc:
-            self._connection.rollback()
-            raise MetadataStoreError(
-                f"문서 등록 거부: {document.document_id} "
-                f"(중복 버전·해시 또는 제약 위반: {exc})"
-            ) from exc
-        except sqlite3.Error as exc:
-            self._connection.rollback()
-            raise MetadataStoreError(f"문서 등록 실패: {exc}") from exc
+        with self._connect() as connection:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO documents (
+                        document_id, logical_document_id, document_version,
+                        original_filename, sha256, mime_type, file_size_bytes,
+                        page_count, document_type, status, is_active, created_at,
+                        parser_version, chunk_config_version, embedding_model,
+                        embedding_version, indexed_at, deleted_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        document.document_id,
+                        document.logical_document_id,
+                        document.document_version,
+                        document.original_filename,
+                        document.sha256,
+                        document.mime_type,
+                        document.file_size_bytes,
+                        document.page_count,
+                        document.document_type,
+                        document.status.value,
+                        int(document.is_active),
+                        _to_iso(document.created_at),
+                        document.parser_version,
+                        document.chunk_config_version,
+                        document.embedding_model,
+                        document.embedding_version,
+                        _to_iso(document.indexed_at) if document.indexed_at else None,
+                        _to_iso(document.deleted_at) if document.deleted_at else None,
+                    ),
+                )
+                connection.commit()
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise MetadataStoreError(
+                    f"문서 등록 거부: {document.document_id} "
+                    f"(중복 버전·해시 또는 제약 위반: {exc})"
+                ) from exc
+            except sqlite3.Error as exc:
+                connection.rollback()
+                raise MetadataStoreError(f"문서 등록 실패: {exc}") from exc
 
     def get(self, document_id: str) -> Document | None:
-        row = self._connection.execute(
-            "SELECT * FROM documents WHERE document_id = ?", (document_id,)
-        ).fetchone()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM documents WHERE document_id = ?", (document_id,)
+            ).fetchone()
         return _to_document(row) if row else None
 
     def find_by_sha256(self, logical_document_id: str, sha256: str) -> Document | None:
-        row = self._connection.execute(
-            "SELECT * FROM documents WHERE logical_document_id = ? AND sha256 = ?",
-            (logical_document_id, sha256),
-        ).fetchone()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM documents WHERE logical_document_id = ? AND sha256 = ?",
+                (logical_document_id, sha256),
+            ).fetchone()
         return _to_document(row) if row else None
 
     def find_sha256_across_series(self, sha256: str) -> list[Document]:
@@ -227,10 +257,11 @@ class SqliteDocumentRepository:
         여기서 막지 않고 알리기만 한다. 같은 PDF가 두 제품에 공용으로 쓰이는
         정당한 경우가 있어서, 등록을 거부할지는 색인 서비스가 정한다.
         """
-        rows = self._connection.execute(
-            "SELECT * FROM documents WHERE sha256 = ? ORDER BY logical_document_id",
-            (sha256,),
-        ).fetchall()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM documents WHERE sha256 = ? ORDER BY logical_document_id",
+                (sha256,),
+            ).fetchall()
         return [_to_document(row) for row in rows]
 
     def record_parse_result(
@@ -352,42 +383,44 @@ class SqliteDocumentRepository:
         (01 §17.6: 실패 시 기존 서비스 검색 상태 유지). partial unique index
         때문에 트랜잭션 안에서 비활성화를 먼저 한다.
         """
-        try:
-            self._connection.execute("BEGIN IMMEDIATE")
-            row = self._connection.execute(
-                "SELECT logical_document_id, status FROM documents WHERE document_id = ?",
-                (document_id,),
-            ).fetchone()
-            if row is None:
-                raise MetadataStoreError(f"활성 전환 실패: 문서 없음 ({document_id})")
-            if row["status"] != DocumentStatus.READY.value:
-                raise MetadataStoreError(
-                    f"활성 전환 거부: {document_id}는 READY가 아님 (현재 {row['status']})"
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT logical_document_id, status FROM documents WHERE document_id = ?",
+                    (document_id,),
+                ).fetchone()
+                if row is None:
+                    raise MetadataStoreError(f"활성 전환 실패: 문서 없음 ({document_id})")
+                if row["status"] != DocumentStatus.READY.value:
+                    raise MetadataStoreError(
+                        f"활성 전환 거부: {document_id}는 READY가 아님 (현재 {row['status']})"
+                    )
+                connection.execute(
+                    """
+                    UPDATE documents SET is_active = 0, status = ?
+                     WHERE logical_document_id = ? AND is_active = 1 AND document_id != ?
+                    """,
+                    (DocumentStatus.INACTIVE.value, row["logical_document_id"], document_id),
                 )
-            self._connection.execute(
-                """
-                UPDATE documents SET is_active = 0, status = ?
-                 WHERE logical_document_id = ? AND is_active = 1 AND document_id != ?
-                """,
-                (DocumentStatus.INACTIVE.value, row["logical_document_id"], document_id),
-            )
-            self._connection.execute(
-                "UPDATE documents SET is_active = 1 WHERE document_id = ?",
-                (document_id,),
-            )
-            self._connection.commit()
-        except MetadataStoreError:
-            self._connection.rollback()
-            raise
-        except sqlite3.Error as exc:
-            self._connection.rollback()
-            raise MetadataStoreError(f"활성 전환 실패: {document_id} ({exc})") from exc
+                connection.execute(
+                    "UPDATE documents SET is_active = 1 WHERE document_id = ?",
+                    (document_id,),
+                )
+                connection.commit()
+            except MetadataStoreError:
+                connection.rollback()
+                raise
+            except sqlite3.Error as exc:
+                connection.rollback()
+                raise MetadataStoreError(f"활성 전환 실패: {document_id} ({exc})") from exc
 
     def active_document_ids(self) -> list[str]:
-        rows = self._connection.execute(
-            "SELECT document_id FROM documents WHERE is_active = 1 AND status = ?",
-            (DocumentStatus.READY.value,),
-        ).fetchall()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT document_id FROM documents WHERE is_active = 1 AND status = ?",
+                (DocumentStatus.READY.value,),
+            ).fetchall()
         return [row["document_id"] for row in rows]
 
     def recover_abandoned_indexing(self, owner_id: str | None = None) -> list[str]:
@@ -423,45 +456,51 @@ class SqliteDocumentRepository:
             conditions.append("owner_id = ?")
             parameters.append(owner_id)
 
-        try:
-            rows = self._connection.execute(
-                f"""
-                UPDATE documents
-                   SET status = ?,
-                       last_error = '색인 중 프로세스가 중단된 것으로 판정',
-                       owner_id = NULL, lease_until = NULL
-                 WHERE status = ? AND ({" OR ".join(conditions)})
-                RETURNING document_id
-                """,
-                (DocumentStatus.INDEX_FAILED.value, DocumentStatus.INDEXING.value, *parameters),
-            ).fetchall()
-            self._connection.commit()
-            return [row["document_id"] for row in rows]
-        except sqlite3.Error as exc:
-            self._connection.rollback()
-            raise MetadataStoreError(f"버려진 색인 복구 실패: {exc}") from exc
+        with self._connect() as connection:
+            try:
+                rows = connection.execute(
+                    f"""
+                    UPDATE documents
+                       SET status = ?,
+                           last_error = '색인 중 프로세스가 중단된 것으로 판정',
+                           owner_id = NULL, lease_until = NULL
+                     WHERE status = ? AND ({" OR ".join(conditions)})
+                    RETURNING document_id
+                    """,
+                    (DocumentStatus.INDEX_FAILED.value, DocumentStatus.INDEXING.value, *parameters),
+                ).fetchall()
+                connection.commit()
+                return [row["document_id"] for row in rows]
+            except sqlite3.Error as exc:
+                connection.rollback()
+                raise MetadataStoreError(f"버려진 색인 복구 실패: {exc}") from exc
 
     def _update_status(
         self, document_id: str, sql: str, parameters: tuple, failure_hint: str = ""
     ) -> None:
-        try:
-            cursor = self._connection.execute(sql, parameters)
-            if cursor.rowcount == 0:
-                self._connection.rollback()
-                raise MetadataStoreError(self._explain_no_match(document_id, failure_hint))
-            self._connection.commit()
-        except sqlite3.Error as exc:
-            self._connection.rollback()
-            raise MetadataStoreError(f"상태 갱신 실패: {document_id} ({exc})") from exc
+        with self._connect() as connection:
+            try:
+                cursor = connection.execute(sql, parameters)
+                if cursor.rowcount == 0:
+                    connection.rollback()
+                    raise MetadataStoreError(
+                        self._explain_no_match(connection, document_id, failure_hint)
+                    )
+                connection.commit()
+            except sqlite3.Error as exc:
+                connection.rollback()
+                raise MetadataStoreError(f"상태 갱신 실패: {document_id} ({exc})") from exc
 
-    def _explain_no_match(self, document_id: str, failure_hint: str) -> str:
+    def _explain_no_match(
+        self, connection: sqlite3.Connection, document_id: str, failure_hint: str
+    ) -> str:
         """갱신 대상이 없는 이유를 찾아 메시지로 만든다.
 
         rowcount가 0인 원인은 여럿이다. 문서가 없거나, 상태가 안 맞거나,
         소유자가 다르다. 고정 문구를 쓰면 로그만 보고 원인을 반대로 짚게 된다.
         오류 경로라 조회를 한 번 더 하는 비용은 문제가 되지 않는다.
         """
-        row = self._connection.execute(
+        row = connection.execute(
             "SELECT status, owner_id FROM documents WHERE document_id = ?", (document_id,)
         ).fetchone()
         if row is None:

@@ -43,8 +43,7 @@ def _document(
 def repository(tmp_path: Path) -> SqliteDocumentRepository:
     repo = SqliteDocumentRepository(tmp_path / "metadata.db")
     repo.initialize()
-    yield repo
-    repo.close()
+    return repo
 
 
 def test_등록과_조회가_모든_필드를_보존한다(repository: SqliteDocumentRepository) -> None:
