@@ -124,14 +124,18 @@ class OllamaEmbeddingModel:
                 f"입력 {len(texts)}개에 벡터 {len(embeddings)}개가 옴. "
                 f"순서 짝짓기가 불가능하므로 결과를 쓰지 않음"
             )
+        # 검증을 전부 통과한 뒤에만 차원을 캐시에 커밋한다. 도중에 커밋하면
+        # 혼입 배치를 거부하고도 오염된 차원이 남아 이후 정상 응답까지 거부한다.
+        observed_dimension = self._dimension
         for vector in embeddings:
-            if self._dimension is None:
-                self._dimension = len(vector)
-            elif len(vector) != self._dimension:
+            if observed_dimension is None:
+                observed_dimension = len(vector)
+            elif len(vector) != observed_dimension:
                 raise IndexingError(
-                    f"벡터 차원 불일치: {len(vector)} != {self._dimension}. "
+                    f"벡터 차원 불일치: {len(vector)} != {observed_dimension}. "
                     f"모델이 바뀌었는지 확인할 것"
                 )
+        self._dimension = observed_dimension
         return embeddings
 
     def _send_with_retry_once(self, payload: bytes) -> dict:
@@ -139,6 +143,9 @@ class OllamaEmbeddingModel:
 
         재사용 커넥션은 서버 재시작이나 keep-alive 만료로 조용히 죽는다.
         그 경우 한 번의 재연결은 오류가 아니다. 두 번째 실패는 올린다.
+
+        전제: /api/embed는 서버 상태를 바꾸지 않는 멱등 연산이라 이중 전송이
+        안전하다. 이 재시도 패턴을 비멱등 API에 복사하면 사고가 된다.
         """
         for attempt in (1, 2):
             try:
