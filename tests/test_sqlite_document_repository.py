@@ -43,8 +43,7 @@ def _document(
 def repository(tmp_path: Path) -> SqliteDocumentRepository:
     repo = SqliteDocumentRepository(tmp_path / "metadata.db")
     repo.initialize()
-    yield repo
-    repo.close()
+    return repo
 
 
 def test_등록과_조회가_모든_필드를_보존한다(repository: SqliteDocumentRepository) -> None:
@@ -412,3 +411,27 @@ def test_상태_갱신_실패_메시지가_원인을_구분한다(
 
     with pytest.raises(MetadataStoreError, match="현재 상태 READY"):
         repository.mark_indexing("v1", owner_id="worker-1", lease_seconds=300)
+
+
+def test_저장된_모든_시각이_같은_형식이다(
+    repository: SqliteDocumentRepository, tmp_path: Path
+) -> None:
+    """마이크로초 고정 UTC ISO. 형식이 섞이면 lease_until 문자열 비교가 뒤집힌다."""
+    import re
+
+    repository.register(_document(document_id="doc-1"))
+    repository.mark_indexing("doc-1", owner_id="host-1", lease_seconds=300)
+    repository.heartbeat("doc-1", owner_id="host-1", lease_seconds=300)
+    repository.mark_ready("doc-1", owner_id="host-1", chunk_count=1)
+
+    pattern = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+00:00$")
+    raw_connection = sqlite3.connect(tmp_path / "metadata.db")
+    row = raw_connection.execute(
+        "SELECT created_at, indexing_started_at, heartbeat_at, indexed_at"
+        " FROM documents WHERE document_id = 'doc-1'"
+    ).fetchone()
+    raw_connection.close()
+
+    for value in row:
+        assert value is not None
+        assert pattern.match(value), f"형식 불일치: {value}"
