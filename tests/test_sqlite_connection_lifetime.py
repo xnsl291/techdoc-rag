@@ -18,6 +18,14 @@ from techdoc_rag.adapters.sqlite_document_repository import SqliteDocumentReposi
 from techdoc_rag.domain.document import Document, DocumentStatus
 from techdoc_rag.domain.errors import MetadataStoreError
 
+# mark_ready의 재현성 필수 인자(NFR-004). 테스트 관심사가 아니라 공용으로 둔다.
+_PROVENANCE = {
+    "parser_version": "pypdfium2-test",
+    "chunk_config_version": "v1",
+    "embedding_model": "bge-m3",
+    "embedding_version": "v1",
+}
+
 
 def _document(document_id: str, logical_document_id: str, version: int = 1) -> Document:
     return Document(
@@ -69,7 +77,9 @@ def test_여러_스레드가_동시에_읽고_써도_오류가_없다(
     def register_family(index: int) -> None:
         repository.register(_document(f"doc-{index}", f"manual-{index}"))
         repository.mark_indexing(f"doc-{index}", owner_id=f"host-{index}", lease_seconds=300)
-        repository.mark_ready(f"doc-{index}", owner_id=f"host-{index}", chunk_count=1)
+        repository.mark_ready(
+            f"doc-{index}", owner_id=f"host-{index}", chunk_count=1, **_PROVENANCE
+        )
         repository.activate(f"doc-{index}")
 
     def read_repeatedly(_: int) -> None:
@@ -97,12 +107,12 @@ def test_활성_전환_중_다른_스레드의_쓰기가_끼어들어도_원자�
     """
     repository.register(_document("v1", "manual-g100", version=1))
     repository.mark_indexing("v1", owner_id="host", lease_seconds=300)
-    repository.mark_ready("v1", owner_id="host", chunk_count=1)
+    repository.mark_ready("v1", owner_id="host", chunk_count=1, **_PROVENANCE)
     repository.activate("v1")
 
     repository.register(_document("v2", "manual-g100", version=2))
     repository.mark_indexing("v2", owner_id="host", lease_seconds=300)
-    repository.mark_ready("v2", owner_id="host", chunk_count=1)
+    repository.mark_ready("v2", owner_id="host", chunk_count=1, **_PROVENANCE)
 
     def noisy_writer(index: int) -> None:
         # 전환과 무관한 계열에 쓰기를 계속 일으켜 커밋이 겹치게 한다.
