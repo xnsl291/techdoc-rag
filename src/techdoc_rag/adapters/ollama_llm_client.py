@@ -64,8 +64,15 @@ class OllamaLlmClient:
             )
         if parts.hostname is None or parts.port is None:
             raise GenerationError(f"endpoint 형식이 잘못됨: {endpoint} (예: http://127.0.0.1:11434)")
-        if max_concurrent_generations <= 0:
-            raise GenerationError("max_concurrent_generations는 양수여야 함")
+        if max_concurrent_generations != 1:
+            # 이 구현은 커넥션 하나를 재사용하므로 동시 생성 2 이상이면
+            # 스레드들이 같은 커넥션을 공유해 요청과 응답이 섞인다(리뷰 지적).
+            # DP-51로 값을 올리는 날에는 커넥션 풀부터 만들어야 한다.
+            # 조용히 깨지는 것보다 여기서 막는 쪽을 택한다.
+            raise GenerationError(
+                "이 구현은 max_concurrent_generations=1만 지원함. "
+                "값을 올리려면 커넥션 분리(풀)가 먼저 필요함"
+            )
 
         self._model_name = model_name
         self._host = parts.hostname
@@ -97,6 +104,9 @@ class OllamaLlmClient:
 
         다 쓰지 않을 이터레이터는 명시적으로 close()할 것 — GC에 맡기면
         세마포어 해제와 서버 쪽 생성 중단 시점이 불확정이다.
+
+        제너레이터라 대기·접속은 첫 next()에서 일어난다. 대기 초과의
+        GenerationError는 generate() 호출부가 아니라 첫 소비 지점에서 터진다.
         """
         wait_started = time.perf_counter()
         if not self._semaphore.acquire(timeout=self._queue_timeout_seconds):
@@ -142,7 +152,7 @@ class OllamaLlmClient:
             self._last_metrics = GenerationMetrics(
                 wait_seconds=wait_seconds,
                 first_token_seconds=(
-                    first_token_at - request_started if first_token_at else None
+                    first_token_at - request_started if first_token_at is not None else None
                 ),
                 total_seconds=total,
                 completed=completed,
