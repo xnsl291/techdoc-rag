@@ -297,16 +297,19 @@ def test_파싱_결과가_색인_후에도_남는다(
 ) -> None:
     """FR-002. 파싱 직후 메모리에만 있으면 색인이 끝나고 나서 확인할 방법이 없다."""
     repository.register(_document(document_id="v1"))
-    repository.record_parse_result("v1", failed_page_count=2, pages_without_text_layer=18)
+    repository.record_parse_result(
+        "v1", page_count=20, failed_page_count=2, pages_without_text_layer=18
+    )
 
     raw_connection = sqlite3.connect(tmp_path / "metadata.db")
     row = raw_connection.execute(
-        "SELECT failed_page_count, pages_without_text_layer FROM documents"
+        "SELECT page_count, failed_page_count, pages_without_text_layer FROM documents"
         " WHERE document_id = 'v1'"
     ).fetchone()
     raw_connection.close()
 
-    assert row == (2, 18)
+    # 등록 시점의 page_count(가짜 값)가 파싱 실측값 20으로 바뀌어 있어야 한다.
+    assert row == (20, 2, 18)
 
 
 def test_색인_중인_문서는_다시_잡을_수_없다(repository: SqliteDocumentRepository) -> None:
@@ -398,7 +401,9 @@ def test_계열_ID_형식이_틀리면_등록이_거부된다(
 def test_파싱_결과를_문서로_읽을_수_있다(repository: SqliteDocumentRepository) -> None:
     """FR-002. raw SQL로 DB를 열어야 보인다면 식별 가능하다고 할 수 없다."""
     repository.register(_document(document_id="v1"))
-    repository.record_parse_result("v1", failed_page_count=2, pages_without_text_layer=18)
+    repository.record_parse_result(
+        "v1", page_count=20, failed_page_count=2, pages_without_text_layer=18
+    )
 
     document = repository.get("v1")
     assert document is not None

@@ -238,6 +238,33 @@ class QdrantVectorStore:
         except Exception as error:
             raise IndexingError(f"문서 벡터 삭제 실패: {error}") from error
 
+    def delete_stale_runs(self, document_id: str, current_index_run_id: str) -> None:
+        """같은 문서에서 이번 실행이 아닌 벡터를 지운다(05 CR-01).
+
+        실패했다 재시도한 색인의 잔여 벡터와, 청크 수가 줄어 chunk_id가
+        사라진 벡터가 여기서 정리된다. 남으면 같은 document_id라 활성 필터를
+        통과해 검색 근거로 쓰인다.
+        """
+        try:
+            self._client.delete(
+                collection_name=self._collection_name,
+                points_selector=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="document_id", match=models.MatchValue(value=document_id)
+                        )
+                    ],
+                    must_not=[
+                        models.FieldCondition(
+                            key="index_run_id",
+                            match=models.MatchValue(value=current_index_run_id),
+                        )
+                    ],
+                ),
+            )
+        except Exception as error:
+            raise IndexingError(f"고아 벡터 정리 실패: {error}") from error
+
     def count(self) -> int:
         """저장된 포인트 수. 멱등성 검증과 운영 점검에 쓴다."""
         try:

@@ -337,3 +337,47 @@ def test_검색_결과는_유사도_내림차순이다(store: QdrantVectorStore)
     scores = [result.score for result in results]
     assert scores == sorted(scores, reverse=True)
     assert results[0].chunk.chunk_id == "doc-a:0000"
+
+
+def test_고아_벡터_정리는_이번_실행이_아닌_것만_지운다(store: QdrantVectorStore) -> None:
+    """실패한 이전 실행의 잔여와 청크 수 축소로 사라진 chunk_id가 정리 대상이다.
+
+    다른 문서의 벡터는 건드리지 않는다 — 지우면 멀쩡한 문서가 검색에서 빠진다.
+    """
+    old_run = IndexRun(
+        document_id="doc-a",
+        logical_document_id="ls-g100",
+        document_type="manual",
+        index_run_id="run-old",
+    )
+    store.upsert(
+        [_chunk("doc-a:0000"), _chunk("doc-a:0001")],
+        [_vector(0.1), _vector(0.2)],
+        old_run,
+    )
+    other_document_run = IndexRun(
+        document_id="doc-b",
+        logical_document_id="ls-s100",
+        document_type="manual",
+        index_run_id="run-other",
+    )
+    store.upsert(
+        [_chunk("doc-b:0000", document_id="doc-b")], [_vector(0.3)], other_document_run
+    )
+    # 새 실행이 청크 1개만 만들었다 — doc-a:0001은 사라진 chunk_id다.
+    new_run = IndexRun(
+        document_id="doc-a",
+        logical_document_id="ls-g100",
+        document_type="manual",
+        index_run_id="run-new",
+    )
+    store.upsert([_chunk("doc-a:0000")], [_vector(0.9)], new_run)
+    assert store.count() == 3  # 정리 전: doc-a 2개(덮어쓰기 1 + 잔여 1) + doc-b 1개
+
+    store.delete_stale_runs("doc-a", current_index_run_id="run-new")
+
+    assert store.count() == 2  # doc-a 잔여(run-old의 :0001)만 사라짐
+    remaining = store.search([1.0, 0.0, 0.0, 0.0], top_k=10, active_document_ids=["doc-a"])
+    assert [result.chunk.chunk_id for result in remaining] == ["doc-a:0000"]
+    other = store.search([1.0, 0.0, 0.0, 0.0], top_k=10, active_document_ids=["doc-b"])
+    assert len(other) == 1  # 다른 문서는 무사

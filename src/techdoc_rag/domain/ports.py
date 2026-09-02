@@ -49,7 +49,11 @@ class DocumentRepository(Protocol):
     def find_sha256_across_series(self, sha256: str) -> list[Document]: ...
 
     def record_parse_result(
-        self, document_id: str, failed_page_count: int, pages_without_text_layer: int
+        self,
+        document_id: str,
+        page_count: int,
+        failed_page_count: int,
+        pages_without_text_layer: int,
     ) -> None: ...
 
     def mark_indexing(self, document_id: str, owner_id: str, lease_seconds: int) -> None: ...
@@ -182,6 +186,10 @@ class VectorStore(Protocol):
     IndexRun의 값들은 청크마다 같지만 payload에 복제한다. 문서 계열이나 종류로
     검색을 좁히려면 벡터 저장소가 그 값을 알아야 하고, 모르면 검색 결과마다
     SQLite를 다시 조회하게 된다.
+
+    delete_stale_runs는 같은 문서에서 이번 실행이 아닌 벡터를 지운다(05 CR-01).
+    청크 수가 줄어든 재색인에서 이전 벡터가 남으면 같은 document_id라
+    활성 필터를 통과해 검색 근거로 쓰인다. 색인 성공 직후 호출한다.
     """
 
     def upsert(
@@ -199,6 +207,8 @@ class VectorStore(Protocol):
     ) -> list[RetrievedChunk]: ...
 
     def delete_document(self, document_id: str) -> None: ...
+
+    def delete_stale_runs(self, document_id: str, current_index_run_id: str) -> None: ...
 
 
 class LlmClient(Protocol):
