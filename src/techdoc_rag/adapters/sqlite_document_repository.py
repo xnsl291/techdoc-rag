@@ -265,17 +265,25 @@ class SqliteDocumentRepository:
         return [_to_document(row) for row in rows]
 
     def record_parse_result(
-        self, document_id: str, failed_page_count: int, pages_without_text_layer: int
+        self,
+        document_id: str,
+        page_count: int,
+        failed_page_count: int,
+        pages_without_text_layer: int,
     ) -> None:
-        """파싱 결과를 남긴다. 이 값들은 색인이 끝나면 메모리에서 사라진다(FR-002)."""
+        """파싱 결과를 남긴다. 이 값들은 색인이 끝나면 메모리에서 사라진다(FR-002).
+
+        page_count도 여기서 채운다. 등록은 파싱 전에 일어나므로(이슈 #17의 순서)
+        등록 시점에는 페이지 수를 알 수 없고, 그때 넣은 0이 영영 남으면 안 된다.
+        """
         self._update_status(
             document_id,
             """
             UPDATE documents
-               SET failed_page_count = ?, pages_without_text_layer = ?
+               SET page_count = ?, failed_page_count = ?, pages_without_text_layer = ?
              WHERE document_id = ?
             """,
-            (failed_page_count, pages_without_text_layer, document_id),
+            (page_count, failed_page_count, pages_without_text_layer, document_id),
         )
 
     def mark_indexing(self, document_id: str, owner_id: str, lease_seconds: int) -> None:

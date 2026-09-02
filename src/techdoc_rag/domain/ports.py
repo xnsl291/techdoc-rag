@@ -49,7 +49,11 @@ class DocumentRepository(Protocol):
     def find_sha256_across_series(self, sha256: str) -> list[Document]: ...
 
     def record_parse_result(
-        self, document_id: str, failed_page_count: int, pages_without_text_layer: int
+        self,
+        document_id: str,
+        page_count: int,
+        failed_page_count: int,
+        pages_without_text_layer: int,
     ) -> None: ...
 
     def mark_indexing(self, document_id: str, owner_id: str, lease_seconds: int) -> None: ...
