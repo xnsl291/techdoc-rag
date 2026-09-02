@@ -31,6 +31,10 @@ from techdoc_rag.domain.ports import (
     VectorStore,
 )
 
+# 같은 해시가 이미 있어도 색인을 다시 시도해야 하는 상태.
+# mark_indexing이 받아 주는 상태와 같다 — 저장소의 재시도 규칙을 그대로 따른다.
+_RETRYABLE = (DocumentStatus.NEW, DocumentStatus.INDEX_FAILED)
+
 
 @dataclass(frozen=True, slots=True)
 class IngestionResult:
@@ -78,31 +82,38 @@ class IngestionService:
         """
         sha256 = _file_sha256(pdf_path)
         existing = self._repository.find_by_sha256(logical_document_id, sha256)
-        if existing is not None:
+        if existing is not None and existing.status not in _RETRYABLE:
             # 내용이 같은 파일을 같은 계열에 다시 넣은 것 — 새 버전이 아니다.
+            # NEW/INDEX_FAILED는 여기서 걸러내면 안 된다. 걸러내면 실패한 문서가
+            # "이미 처리됨"으로 반환되어 저장소가 열어 둔 재시도 경로가 막힌다(리뷰 B-1).
             return IngestionResult(
                 document_id=existing.document_id,
                 chunk_count=0,
                 duplicate_of=existing.document_id,
             )
 
-        document_id = f"{logical_document_id}-v{document_version}"
-        self._repository.register(
-            Document(
-                document_id=document_id,
-                logical_document_id=logical_document_id,
-                document_version=document_version,
-                original_filename=pdf_path.name,
-                sha256=sha256,
-                mime_type="application/pdf",
-                file_size_bytes=pdf_path.stat().st_size,
-                page_count=0,  # 파싱 전이라 모른다. record_parse_result가 채운다.
-                document_type=document_type,
-                status=DocumentStatus.NEW,
-                is_active=False,
-                created_at=datetime.now(UTC),
+        if existing is not None:
+            # 등록만 됐거나 색인이 실패한 문서 — 등록을 건너뛰고 그 자리에서 재개한다.
+            document_id = existing.document_id
+            document_version = existing.document_version
+        else:
+            document_id = f"{logical_document_id}-v{document_version}"
+            self._repository.register(
+                Document(
+                    document_id=document_id,
+                    logical_document_id=logical_document_id,
+                    document_version=document_version,
+                    original_filename=pdf_path.name,
+                    sha256=sha256,
+                    mime_type="application/pdf",
+                    file_size_bytes=pdf_path.stat().st_size,
+                    page_count=0,  # 파싱 전이라 모른다. record_parse_result가 채운다.
+                    document_type=document_type,
+                    status=DocumentStatus.NEW,
+                    is_active=False,
+                    created_at=datetime.now(UTC),
+                )
             )
-        )
         self._repository.mark_indexing(
             document_id, owner_id=self._owner_id, lease_seconds=self._lease_seconds
         )

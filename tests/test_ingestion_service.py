@@ -270,3 +270,38 @@ def test_같은_계열_같은_해시는_다시_색인하지_않는다(
     assert second.duplicate_of == first.document_id
     assert len(store.upserted) == upserts_after_first  # 임베딩·저장이 다시 일어나지 않음
     assert repository.get("ls-g100-v2") is None  # 새 버전으로 등록되지도 않음
+
+
+def test_실패한_문서는_같은_파일로_재시도하면_이어서_색인한다(
+    repository: RecordingRepository, events: list[str], pdf: Path
+) -> None:
+    """리뷰 B-1. 중복 사전 확인이 INDEX_FAILED까지 잡으면 일과성 실패
+    (임베딩 서버 다운 등)가 같은 파일로는 영영 복구되지 않는다."""
+    failing_service, _ = _service(repository, events, parser=FailingParser())
+    with pytest.raises(ParsingError):
+        failing_service.ingest(pdf, "ls-g100", document_version=1, document_type="manual")
+
+    service, store = _service(repository, events)
+    result = service.ingest(pdf, "ls-g100", document_version=1, document_type="manual")
+
+    assert result.duplicate_of is None  # 실패 문서를 "이미 처리됨"으로 오인하지 않음
+    assert result.document_id == "ls-g100-v1"  # 새 버전이 아니라 같은 자리에서 재개
+    document = repository.get("ls-g100-v1")
+    assert document is not None
+    assert document.status is DocumentStatus.READY
+    assert len(store.upserted) >= 1
+
+
+def test_READY_문서는_같은_파일_재시도에서도_중복이다(
+    repository: RecordingRepository, events: list[str], pdf: Path
+) -> None:
+    """재시도 허용은 NEW/INDEX_FAILED뿐이다. 성공한 문서까지 다시 색인하면
+    재실행할 때마다 색인 비용을 다시 치른다."""
+    service, store = _service(repository, events)
+    first = service.ingest(pdf, "ls-g100", document_version=1, document_type="manual")
+    upserts = len(store.upserted)
+
+    second = service.ingest(pdf, "ls-g100", document_version=1, document_type="manual")
+
+    assert second.duplicate_of == first.document_id
+    assert len(store.upserted) == upserts
