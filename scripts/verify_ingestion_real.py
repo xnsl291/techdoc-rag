@@ -101,7 +101,9 @@ def main() -> int:
     verdict = "통과" if count == result.chunk_count else "실패"
     print(f"\n[2] 벡터 수: {count} (기대 {result.chunk_count}) → {verdict}")
     if count != result.chunk_count:
-        return 1
+        return 1  # 이후 단계가 전부 이 개수를 기준으로 하므로 즉시 끝낸다
+
+    failures: list[str] = []
 
     # 이후 단계에서 쓸 현재 run id — 저장된 payload에서 꺼낸다(정본은 저장소).
     points, _ = vector_store._client.scroll(  # noqa: SLF001 (검증 스크립트 한정)
@@ -122,6 +124,8 @@ def main() -> int:
     vector_store.upsert(chunks, vectors, same_run)
     after_reupsert = vector_store.count()
     verdict = "통과" if after_reupsert == count else "실패 (중복 적재)"
+    if after_reupsert != count:
+        failures.append("[3] 재저장 멱등")
     print(f"\n[3] 같은 chunk_id 재저장 후: {after_reupsert} (기대 {count}) → {verdict}")
 
     # 4) 잔여 벡터 주입 → 정리 → 원래 개수 복귀
@@ -141,6 +145,8 @@ def main() -> int:
     vector_store.delete_stale_runs(result.document_id, current_run_id)
     restored = vector_store.count()
     verdict = "통과" if (inflated == count + len(stale_chunks) and restored == count) else "실패"
+    if verdict != "통과":
+        failures.append("[4] 잔여 정리")
     print(
         f"\n[4] 잔여 주입 {inflated} → delete_stale_runs → {restored}"
         f" (기대 {count}) → {verdict}"
@@ -152,10 +158,17 @@ def main() -> int:
         arguments.pdf, arguments.logical_id, document_version=2, document_type="manual"
     )
     verdict = "통과" if again.duplicate_of == result.document_id else "실패"
+    if verdict != "통과":
+        failures.append("[5] 중복 판정")
     print(
         f"\n[5] 같은 파일 재투입: duplicate_of={again.duplicate_of}"
         f" / {time.perf_counter() - started:.2f}s → {verdict}"
     )
+
+    if failures:
+        # print만 하고 exit 0이면 자동 게이트에서 실패가 통과로 보인다(리뷰 N-2).
+        print(f"\n실패한 단계: {', '.join(failures)}")
+        return 1
     return 0
 
 
