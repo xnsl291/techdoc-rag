@@ -20,7 +20,11 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException
 
 from techdoc_rag.api.schemas import ChatRequest, ChatResponse, HealthResponse
-from techdoc_rag.domain.errors import GenerationError, RetrievalError
+from techdoc_rag.domain.errors import (
+    GenerationError,
+    MetadataStoreError,
+    RetrievalError,
+)
 from techdoc_rag.query.chat_service import ChatService
 
 # 이름 → 접근 확인 함수. 실패는 예외로 알린다.
@@ -45,9 +49,10 @@ def create_app(
             )
         try:
             answer = chat_service.ask(request.question)
-        except (RetrievalError, GenerationError) as error:
+        except (RetrievalError, GenerationError, MetadataStoreError) as error:
             # 장애는 No-answer가 아니라 503이다(D-005). LLM 일반 지식으로
-            # 우회하지 않았다는 사실이 상태 코드로 드러난다.
+            # 우회하지 않았다는 사실이 상태 코드로 드러난다. MetadataStoreError는
+            # 활성 목록·문서명 조회(SQLite)의 장애다(리뷰 #28 B2).
             raise HTTPException(status_code=503, detail=str(error)) from error
         return ChatResponse.from_answer(answer)
 
