@@ -163,6 +163,17 @@ class _FakeApiHandler(BaseHTTPRequestHandler):
             self._reply(200, "<html>다른 서버입니다</html>")
         elif behavior == "bad_components":
             self._reply(200, json.dumps({"status": "ok", "components": ["sqlite", "llm"]}))
+        elif behavior == "null_components":
+            self._reply(200, json.dumps({"status": "ok", "components": None}))
+        elif behavior == "degraded_bad_components":
+            broken = {"status": "degraded", "components": ["ollama"]}
+            self._reply(503, json.dumps({"detail": broken}))
+        elif behavior == "short_body":
+            self.send_response(200)
+            self.send_header("Content-Length", "9999")
+            self.end_headers()
+            self.wfile.write(b'{"partial')
+            self.close_connection = True
         else:
             self._reply(200, json.dumps(payload, ensure_ascii=False))
 
@@ -295,3 +306,50 @@ def test_본문이_잘린_응답도_ApiError다(fake_api) -> None:
 
     with pytest.raises(ApiError):
         ask_api(_base_url(fake_api), "질문", timeout_seconds=5)
+
+
+def test_components가_null이면_빈_dict로_정규화된다(fake_api) -> None:
+    """검증기가 허용하는 값은 소비자가 다룰 수 있어야 한다. 사이드바의
+    health.get("components", {})는 값이 None이면 기본값이 아니라 None을 주고,
+    거기서 AttributeError가 나며 페이지 전체가 죽는다(리뷰 #30 3차)."""
+    fake_api.behavior = "null_components"
+
+    health = fetch_health(_base_url(fake_api))
+
+    assert health["components"] == {}
+    health["components"].items()  # 소비자가 하는 그대로 — 여기서 터지면 안 된다
+
+
+def test_degraded_응답의_components도_검사한다(fake_api) -> None:
+    """503의 detail 안에도 같은 모양이 들어오므로 200 경로만 막으면 반쪽이다."""
+    fake_api.behavior = "degraded_bad_components"
+
+    with pytest.raises(ApiError, match="components"):
+        fetch_health(_base_url(fake_api))
+
+
+def test_health도_본문이_잘리면_ApiError다(fake_api) -> None:
+    fake_api.behavior = "short_body"
+
+    with pytest.raises(ApiError):
+        fetch_health(_base_url(fake_api))
+
+
+def test_no_answer_이유가_문자열이_아니어도_ApiError다() -> None:
+    """서버 버전 불일치는 이 함수가 든 전제 그대로다. 하반부만 try 밖에 있으면
+    dict 조회에서 TypeError가 그대로 샌다(리뷰 #30 3차)."""
+    with pytest.raises(ApiError, match="형식"):
+        to_display(
+            {"text": "원문", "citations": [], "no_answer_reason": {"code": 1}, "answered": False}
+        )
+
+
+@pytest.mark.parametrize("base_url", ["", "myapi", "http://127.0.0.1:8000\n"])
+def test_주소가_잘못돼도_ApiError다(base_url: str) -> None:
+    """TECHDOC_API_URL 오설정에서 ValueError 계열이 그대로 새던 경로.
+    빈 문자열은 현실적이다 — 환경변수를 빈 값으로 두면 기본값이 안 쓰인다."""
+    with pytest.raises(ApiError):
+        ask_api(base_url, "질문", timeout_seconds=2)
+
+    with pytest.raises(ApiError):
+        fetch_health(base_url, timeout_seconds=2)

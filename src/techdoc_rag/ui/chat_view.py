@@ -64,23 +64,25 @@ def to_display(response: dict) -> DisplayAnswer:
         ]
         answered = response["answered"]
         text = response["text"]
+
+        if answered:
+            return DisplayAnswer(
+                answered=True, text=text, notice=None, ungrounded_text=None, citations=citations
+            )
+        # no-answer 분기도 try 안에 둔다. reason이 문자열이 아니면 dict 조회에서
+        # TypeError가 나는데, 서버 버전 불일치는 이 함수가 든 전제 그대로다.
+        reason = response.get("no_answer_reason") or ""
+        return DisplayAnswer(
+            answered=False,
+            text=None,
+            notice=_NO_ANSWER_NOTICES.get(reason, f"답변을 확인할 수 없습니다 ({reason})."),
+            ungrounded_text=text if reason == "NOT_GROUNDED" else None,
+            citations=citations,
+        )
     except (KeyError, TypeError) as error:
         raise ApiError(
             "API 응답 형식이 예상과 다릅니다. 서버와 화면의 버전이 맞는지 확인하세요."
         ) from error
-
-    if answered:
-        return DisplayAnswer(
-            answered=True, text=text, notice=None, ungrounded_text=None, citations=citations
-        )
-    reason = response.get("no_answer_reason") or ""
-    return DisplayAnswer(
-        answered=False,
-        text=None,
-        notice=_NO_ANSWER_NOTICES.get(reason, f"답변을 확인할 수 없습니다 ({reason})."),
-        ungrounded_text=text if reason == "NOT_GROUNDED" else None,
-        citations=citations,
-    )
 
 
 def _page_label(citation: dict) -> str:
@@ -95,13 +97,15 @@ def _page_label(citation: dict) -> str:
 def ask_api(base_url: str, question: str, timeout_seconds: float) -> dict:
     """POST /chat. 실패는 화면에 보여줄 문구를 담은 ApiError로 바꾼다."""
     payload = json.dumps({"question": question}, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(
-        _endpoint(base_url, "chat"),
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
+        # Request 생성도 try 안에 둔다. 주소에 scheme이 없으면 여기서 ValueError가
+        # 나는데, 밖에 두면 그것만 예외 변환을 비껴간다(내 테스트가 잡음).
+        request = urllib.request.Request(
+            _endpoint(base_url, "chat"),
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             return _decode(response.read())
     except urllib.error.HTTPError as error:
@@ -111,13 +115,14 @@ def ask_api(base_url: str, question: str, timeout_seconds: float) -> dict:
         if error.code == 503:
             raise ApiError(f"서버 구성요소 장애입니다: {detail}") from error
         raise ApiError(f"서버 오류 (HTTP {error.code}): {detail}") from error
-    except (OSError, http.client.HTTPException) as error:
+    except (OSError, http.client.HTTPException, ValueError) as error:
         # URLError·TimeoutError는 OSError 하위라 따로 적지 않는다. HTTPException은
         # OSError가 아니어서 별도로 적는다 — Content-Length가 본문보다 큰 응답의
-        # IncompleteRead가 여기로 온다(리뷰 #30 재검토).
+        # IncompleteRead가 여기로 온다. ValueError는 주소 오설정에서 온다
+        # (scheme 없음, 빈 문자열, 개행 섞임 — UnicodeEncodeError도 하위다).
         raise ApiError(
-            "API 서버에 연결할 수 없습니다. FastAPI가 떠 있는지 확인하세요 "
-            f"({base_url})"
+            "API 서버에 연결할 수 없습니다. 주소와 서버 상태를 확인하세요 "
+            f"({base_url!r})"
         ) from error
 
 
@@ -139,17 +144,27 @@ def fetch_health(base_url: str, timeout_seconds: float = 5.0) -> dict:
         if isinstance(detail, dict):
             return _as_health(detail)
         raise ApiError(f"상태 확인 실패 (HTTP {error.code})") from error
-    except (OSError, http.client.HTTPException) as error:
-        raise ApiError("API 서버에 연결할 수 없습니다.") from error
+    except (OSError, http.client.HTTPException, ValueError) as error:
+        raise ApiError(f"API 서버에 연결할 수 없습니다 ({base_url!r}).") from error
 
 
 def _as_health(body: dict) -> dict:
+    """components가 항상 dict인 상태 응답으로 만든다.
+
+    None을 그냥 통과시키면 안 된다. 사이드바의 `health.get("components", {})`는
+    키가 있고 값이 None이면 기본값이 아니라 None을 돌려주고, 거기서
+    AttributeError가 나면서 페이지 전체가 죽는다 — 앞서 고친 list 경우와
+    실패 모드가 같다(리뷰 #30 3차). 검증기가 허용하는 값은 소비자가
+    다룰 수 있는 값이어야 한다.
+    """
     components = body.get("components")
-    if components is not None and not isinstance(components, dict):
+    if components is None:
+        components = {}
+    if not isinstance(components, dict):
         raise ApiError(
             f"상태 응답 형식이 예상과 다릅니다: components가 {type(components).__name__}"
         )
-    return body
+    return {**body, "components": components}
 
 
 def _endpoint(base_url: str, path: str) -> str:
