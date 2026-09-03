@@ -80,14 +80,31 @@ User ──> Streamlit ──> FastAPI ──> Chat Service ──> Qdrant
 
 ## 실행
 
-파이프라인 구현 전이므로 아직 애플리케이션 실행 경로가 없음.
-현재는 벤치마크 스크립트만 실행 가능함.
+문서를 색인한 뒤 API를 띄우고 화면을 연다. Ollama가 먼저 떠 있어야 함.
 
 ```bash
 python -m venv .venv
-.venv\Scripts\python.exe -m pip install psutil
+.venv\Scripts\python.exe -m pip install -e ".[dev]"
 
-# Ollama 실행 후
+# 1) 매뉴얼 색인 (문서 하나)
+.venv\Scripts\python.exe scripts\verify_ingestion_real.py --pdf <매뉴얼.pdf>
+
+# 2) API — 127.0.0.1에만 연다. 인증이 없으므로 외부에 노출하지 않음
+.venv\Scripts\python.exe -m uvicorn --factory techdoc_rag.api.app:create_default_app \
+    --host 127.0.0.1 --port 8000 --app-dir src
+
+# 3) 화면 (다른 터미널에서)
+.venv\Scripts\python.exe -m streamlit run src\techdoc_rag\ui\streamlit_app.py \
+    --server.address=127.0.0.1
+```
+
+`--server.address`를 명령에 직접 넘기는 이유: `.streamlit/config.toml`에도 같은 값이 있지만
+Streamlit이 그 파일을 **실행 디렉터리 기준**으로 찾기 때문에, 저장소 루트가 아닌 곳에서
+띄우면 기본값 `0.0.0.0`으로 되돌아감.
+
+벤치마크 스크립트만 돌리려면:
+
+```bash
 .venv\Scripts\python.exe scripts\benchmark_llm.py \
     --models qwen3.5:4b-q4_K_M --repeat 10 --max-tokens 512
 ```
