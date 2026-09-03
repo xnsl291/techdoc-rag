@@ -12,8 +12,23 @@ similarity_threshold 미만인 것을 버린다. threshold 0.0은 "거르지 않
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from techdoc_rag.domain.chunk import RetrievedChunk
 from techdoc_rag.domain.ports import DocumentRepository, EmbeddingModel, VectorStore
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalResult:
+    """임계값을 통과한 청크와, 걸러진 개수.
+
+    걸러진 개수를 같이 돌려주는 이유: "아무것도 못 찾음"(NO_RELEVANT_CHUNK)과
+    "찾았으나 전부 관련도 미달"(LOW_RELEVANCE)은 개선 방향이 다른데,
+    통과분만 보면 상위에서 이 둘을 구분할 수 없다.
+    """
+
+    chunks: list[RetrievedChunk]
+    dropped_below_threshold: int
 
 
 class Retriever:
@@ -31,7 +46,7 @@ class Retriever:
         self._top_k = top_k
         self._similarity_threshold = similarity_threshold
 
-    def retrieve(self, question: str) -> list[RetrievedChunk]:
+    def retrieve(self, question: str) -> RetrievalResult:
         """질문과 관련된 청크를 점수 내림차순으로 돌려준다.
 
         빈 결과는 실패가 아니다 — 활성 문서가 없거나 관련 청크가 없는 것이고,
@@ -43,6 +58,7 @@ class Retriever:
         results = self._vector_store.search(
             query_vector, top_k=self._top_k, active_document_ids=active_ids
         )
-        return [
-            result for result in results if result.score >= self._similarity_threshold
-        ]
+        kept = [result for result in results if result.score >= self._similarity_threshold]
+        return RetrievalResult(
+            chunks=kept, dropped_below_threshold=len(results) - len(kept)
+        )

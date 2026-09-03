@@ -73,9 +73,9 @@ def test_활성_문서_목록이_검색_필터로_전달된다() -> None:
     store = FakeVectorStore([_retrieved("a", 0.9)])
     retriever = _retriever(store, active=["ls-m100-v1", "ls-g100-v1"])
 
-    results = retriever.retrieve("정격 전류는?")
+    result = retriever.retrieve("정격 전류는?")
 
-    assert [r.chunk.chunk_id for r in results] == ["a"]
+    assert [r.chunk.chunk_id for r in result.chunks] == ["a"]
     assert store.calls == [(5, ["ls-m100-v1", "ls-g100-v1"])]
 
 
@@ -83,24 +83,28 @@ def test_임계값_미만은_버려진다() -> None:
     store = FakeVectorStore([_retrieved("a", 0.9), _retrieved("b", 0.5), _retrieved("c", 0.4)])
     retriever = _retriever(store, active=["ls-m100-v1"], threshold=0.5)
 
-    results = retriever.retrieve("질문")
+    result = retriever.retrieve("질문")
 
     # 경계값 0.5는 남는다 — 미만만 버린다.
-    assert [r.chunk.chunk_id for r in results] == ["a", "b"]
+    assert [r.chunk.chunk_id for r in result.chunks] == ["a", "b"]
+    assert result.dropped_below_threshold == 1
 
 
 def test_임계값_0은_거르지_않는다() -> None:
     store = FakeVectorStore([_retrieved("a", 0.01)])
     retriever = _retriever(store, active=["ls-m100-v1"], threshold=0.0)
 
-    assert len(retriever.retrieve("질문")) == 1
+    assert len(retriever.retrieve("질문").chunks) == 1
 
 
 def test_활성_문서가_없으면_빈_결과다() -> None:
     store = FakeVectorStore([_retrieved("a", 0.9)])
     retriever = _retriever(store, active=[])
 
-    assert retriever.retrieve("질문") == []
+    result = retriever.retrieve("질문")
+
+    assert result.chunks == []
+    assert result.dropped_below_threshold == 0
 
 
 def test_저장소_실패는_RetrievalError로_올라간다() -> None:
