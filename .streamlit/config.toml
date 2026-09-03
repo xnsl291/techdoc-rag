@@ -1,0 +1,8 @@
+# 127.0.0.1 고정 — 무인증 화면을 외부 인터페이스에 열지 않는다(05 보안 절,
+# Ollama·Qdrant·FastAPI와 같은 원칙). 기본값은 0.0.0.0이라 같은 망의 다른
+# 기기에서 접근 가능했음(실물 기동에서 External URL이 찍혀 발견).
+[server]
+address = "127.0.0.1"
+
+[browser]
+gatherUsageStats = false
