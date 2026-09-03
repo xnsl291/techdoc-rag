@@ -3,7 +3,12 @@
 실행 (FastAPI가 먼저 떠 있어야 함):
     uvicorn --factory techdoc_rag.api.app:create_default_app \
         --host 127.0.0.1 --port 8000 --app-dir src
-    streamlit run src/techdoc_rag/ui/streamlit_app.py
+    streamlit run src/techdoc_rag/ui/streamlit_app.py --server.address=127.0.0.1
+
+주소를 명령에 직접 넘긴다. .streamlit/config.toml에도 같은 값이 있지만
+Streamlit은 그 파일을 실행 디렉터리 기준으로 찾으므로, 저장소 루트가 아닌
+곳에서 띄우면 기본값 0.0.0.0으로 조용히 되돌아간다(리뷰 #30 M1).
+인증이 없는 화면이라 노출되면 대가가 크다.
 
 판단 로직은 chat_view.py에 있고 여기는 렌더링만 한다. 지난 문답은
 session_state에만 쌓인다(DP-44 — 서버는 stateless, 새로고침하면 사라짐).
@@ -31,9 +36,18 @@ with st.sidebar:
     st.subheader("서버 상태")
     try:
         health = fetch_health(API_BASE_URL)
-        for name, state in health.get("components", {}).items():
+        components = health.get("components", {})
+        # 전체 판정을 먼저 보인다. 구성요소만 나열하면 목록이 비었을 때
+        # 정상인지 조회를 못 한 것인지 화면에서 구분되지 않는다.
+        if health.get("status") == "ok":
+            st.success("정상")
+        else:
+            st.warning(f"이상 있음 ({health.get('status', '알 수 없음')})")
+        for name, state in components.items():
             icon = "🟢" if state == "ok" else "🔴"
             st.write(f"{icon} {name}: {state}")
+        if not components:
+            st.caption("보고된 구성요소가 없습니다.")
     except ApiError as error:
         st.error(str(error))
 
@@ -49,17 +63,26 @@ def _render_answer(display: DisplayAnswer) -> None:
         if display.ungrounded_text:
             with st.expander("⚠️ 근거 미확인 원문 보기 (참고용 — 답변이 아님)"):
                 st.text(display.ungrounded_text)
-    if display.citations:
-        used = [c for c in display.citations if c.is_used_in_answer]
-        others = [c for c in display.citations if not c.is_used_in_answer]
-        if used:
-            st.markdown("**답변에 사용된 근거**")
-            for citation in used:
-                st.markdown(f"- 📌 {citation.label}")
-        if others:
-            with st.expander(f"검색됐지만 사용되지 않은 근거 {len(others)}건"):
-                for citation in others:
-                    st.markdown(f"- {citation.label}")
+    if not display.citations:
+        return
+    if not display.answered:
+        # 답변이 없으면 "답변에 사용된 근거"라는 말이 성립하지 않는다. 지금은
+        # 서버가 인용 0건일 때만 NOT_GROUNDED를 내지만 그 규칙은 HTTP 계약에
+        # 없으므로, 화면이 서버 내부 불변식에 기대지 않게 한다(리뷰 #30 L4).
+        with st.expander(f"검색된 근거 {len(display.citations)}건"):
+            for citation in display.citations:
+                st.markdown(f"- {citation.label}")
+        return
+    used = [c for c in display.citations if c.is_used_in_answer]
+    others = [c for c in display.citations if not c.is_used_in_answer]
+    if used:
+        st.markdown("**답변에 사용된 근거**")
+        for citation in used:
+            st.markdown(f"- 📌 {citation.label}")
+    if others:
+        with st.expander(f"검색됐지만 사용되지 않은 근거 {len(others)}건"):
+            for citation in others:
+                st.markdown(f"- {citation.label}")
 
 
 for past_question, past_result in st.session_state.history:
