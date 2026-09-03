@@ -128,11 +128,14 @@ def main() -> int:
             )
             print(f"    근거: {pages}")
         print()
-        if "김치찌개" in question and answer.is_answered:
-            ungrounded_ok = False  # 무관 질문이 근거 있는 답으로 둔갑함
+        if "김치찌개" in question:
+            if answer.is_answered:
+                ungrounded_ok = False  # 무관 질문이 근거 있는 답으로 둔갑함
+        elif not answer.is_answered:
+            ungrounded_ok = False  # 답이 있어야 하는 질문이 No-answer로 빠짐 (회귀)
 
     if not ungrounded_ok:
-        print("실패: 무관 질문이 답변됨으로 판정됨 — grounding v1이 못 거름")
+        print("실패: 무관 질문이 답변됨 또는 답변 가능 질문이 No-answer로 판정됨")
         return 1
     return 0
 

@@ -46,44 +46,45 @@ class ContextBuilder:
         같은 chunk_id 중복은 첫 것만 남긴다. display_names는 document_id →
         사람이 읽는 문서명이며, 없는 문서는 document_id를 그대로 쓴다.
         """
-        selected: list[RetrievedChunk] = []
+        sources: list[ContextSource] = []
+        blocks: list[str] = []
         seen: set[str] = set()
         used_chars = 0
         for result in results:
             if result.chunk.chunk_id in seen:
                 continue
             seen.add(result.chunk.chunk_id)
-            entry_length = len(result.chunk.text) + _HEADER_ALLOWANCE
+            # 헤더를 고정 여유분으로 추정하지 않고 블록을 실제로 만들어 잰다(리뷰 #26).
+            # 파일명이 길면 추정치로는 예산을 조용히 넘는다.
+            block = _render_block(len(sources) + 1, result, display_names)
+            entry_length = len(block) + len(_SEPARATOR)
             if used_chars + entry_length > self._budget_chars:
-                continue  # 자르지 않고 통째로 뺀다. 더 낮은 점수는 더 클 수 있어 계속 본다
-            selected.append(result)
+                continue  # 자르지 않고 통째로 뺀다. 더 낮은 점수는 더 짧을 수 있어 계속 본다
+            sources.append(ContextSource(number=len(sources) + 1, retrieved=result))
+            blocks.append(block)
             used_chars += entry_length
 
-        if results and not selected:
+        if results and not sources:
             # 청크 하나도 예산에 안 들어가는 것은 관련도 문제가 아니라 설정 문제다.
             # 조용히 빈 근거로 돌리면 No-answer로 둔갑해 원인을 못 찾는다.
             raise ConfigurationError(
                 f"근거 예산({self._budget_chars}자)이 청크 하나보다 작음. "
                 f"최소 청크 {min(len(r.chunk.text) for r in results)}자"
             )
-
-        sources = [
-            ContextSource(number=index + 1, retrieved=result)
-            for index, result in enumerate(selected)
-        ]
-        blocks = []
-        for source in sources:
-            chunk = source.retrieved.chunk
-            name = display_names.get(chunk.document_id, chunk.document_id)
-            pages = (
-                f"p.{chunk.page_start}"
-                if chunk.page_start == chunk.page_end
-                else f"p.{chunk.page_start}~{chunk.page_end}"
-            )
-            blocks.append(f"[{source.number}] ({name} {pages})\n{chunk.text}")
-        return BuiltContext(text="\n\n".join(blocks), sources=sources)
+        return BuiltContext(text=_SEPARATOR.join(blocks), sources=sources)
 
 
-# 번호·문서명·페이지 헤더 몫으로 잡아 두는 문자 수. 정확할 필요는 없고,
-# 예산 판정이 본문 길이만 세서 헤더만큼 초과하는 것을 막기 위한 여유분이다.
-_HEADER_ALLOWANCE = 80
+_SEPARATOR = "\n\n"
+
+
+def _render_block(
+    number: int, result: RetrievedChunk, display_names: Mapping[str, str]
+) -> str:
+    chunk = result.chunk
+    name = display_names.get(chunk.document_id, chunk.document_id)
+    pages = (
+        f"p.{chunk.page_start}"
+        if chunk.page_start == chunk.page_end
+        else f"p.{chunk.page_start}~{chunk.page_end}"
+    )
+    return f"[{number}] ({name} {pages})\n{chunk.text}"

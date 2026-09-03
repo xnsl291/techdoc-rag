@@ -41,7 +41,10 @@ class NoAnswerReason(StrEnum):
 class Answer:
     """사용자 질문에 대한 최종 응답.
 
-    no_answer_reason이 있으면 text는 답변이 아니라 확인 불가 안내다.
+    no_answer_reason이 있으면 text는 답변이 아니다. NO_RELEVANT_CHUNK와
+    LOW_RELEVANCE의 text는 확인 불가 안내문이고, NOT_GROUNDED의 text는
+    근거 사용이 확인되지 않은 LLM 원문이다 — 평가에서 실패 유형을 분류할
+    재료로 보존하는 것이며, 표시 계층은 이것을 답변처럼 노출하면 안 된다.
     검색이나 생성이 실패한 경우는 여기로 오지 않고 예외로 처리한다.
     장애를 No-answer로 감추면 품질 문제와 장애를 구분할 수 없게 된다.
     """
