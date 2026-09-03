@@ -18,6 +18,8 @@ dependencies = [
     # HTTP 경계(#27). pydantic 검증은 fastapi가 끌고 온다.
     "fastapi>=0.115",
     "uvicorn>=0.30",
+    # 질의 화면(#29). API 호출은 표준 라이브러리로 해서 추가 의존성 없음.
+    "streamlit>=1.38",
 ]
 
 [project.optional-dependencies]
