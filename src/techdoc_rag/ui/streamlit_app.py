@@ -3,12 +3,13 @@
 실행 (FastAPI가 먼저 떠 있어야 함):
     uvicorn --factory techdoc_rag.api.app:create_default_app \
         --host 127.0.0.1 --port 8000 --app-dir src
-    streamlit run src/techdoc_rag/ui/streamlit_app.py --server.address=127.0.0.1
+    python scripts/run_ui.py
 
-주소를 명령에 직접 넘긴다. .streamlit/config.toml에도 같은 값이 있지만
+런처를 쓰는 이유: 주소를 코드에 박아 실행 위치·명령 실수와 무관하게
+127.0.0.1에만 열기 위함이다. .streamlit/config.toml에도 같은 값이 있지만
 Streamlit은 그 파일을 실행 디렉터리 기준으로 찾으므로, 저장소 루트가 아닌
 곳에서 띄우면 기본값 0.0.0.0으로 조용히 되돌아간다(리뷰 #30 M1).
-인증이 없는 화면이라 노출되면 대가가 크다.
+직접 실행할 때는 --server.address=127.0.0.1을 반드시 붙일 것.
 
 판단 로직은 chat_view.py에 있고 여기는 렌더링만 한다. 지난 문답은
 session_state에만 쌓인다(DP-44 — 서버는 stateless, 새로고침하면 사라짐).
