@@ -213,3 +213,24 @@ def test_localhost는_생성_시점에_거부한다() -> None:
 
 def test_빈_입력은_빈_결과다(fake_server) -> None:
     assert _model(fake_server).embed_documents([]) == []
+
+
+def test_여러_스레드가_동시에_질의해도_응답이_섞이지_않는다(fake_server) -> None:
+    """FastAPI 스레드풀이 embed_query를 동시에 부른다(#27). 단일 커넥션
+    재사용 구조라 잠금 없이는 두 요청이 한 소켓에 섞여, 다른 질문의 벡터가
+    조용히 반환되거나 프로토콜 오류로 깨진다(리뷰 #28 B1)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    model = _model(fake_server)
+
+    def query(index: int) -> None:
+        text = f"질문-{index}"
+        expected_head = float(sum(text.encode()) % 97)
+        for _ in range(10):
+            vector = model.embed_query(text)
+            # 자기 입력에서 나온 벡터인지 확인 — 섞이면 다른 스레드 값이 온다.
+            assert vector[0] == expected_head
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        for future in [executor.submit(query, index) for index in range(8)]:
+            future.result()  # 스레드 안의 assert·예외가 여기서 다시 던져진다

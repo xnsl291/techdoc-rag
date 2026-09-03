@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from techdoc_rag.domain.chunk import RetrievedChunk
+from techdoc_rag.domain.errors import IndexingError, RetrievalError
 from techdoc_rag.domain.ports import DocumentRepository, EmbeddingModel, VectorStore
 
 
@@ -58,7 +59,13 @@ class Retriever:
         if not active_ids:
             # 검색 대상이 없으면 질문 임베딩(수십 ms의 Ollama 호출)도 아낀다.
             return RetrievalResult(chunks=[], dropped_below_threshold=0)
-        query_vector = self._embedding_model.embed_query(question)
+        try:
+            query_vector = self._embedding_model.embed_query(question)
+        except IndexingError as error:
+            # 임베딩 어댑터는 색인 경로용이라 IndexingError를 던지지만, 질의
+            # 임베딩 실패는 검색 실패다. 그대로 흘리면 HTTP 계층의 오류 매핑
+            # (Retrieval/Generation→503)에 안 걸려 500이 난다 — 실물 검증에서 발견.
+            raise RetrievalError(f"질문 임베딩 실패: {error}") from error
         results = self._vector_store.search(
             query_vector, top_k=self._top_k, active_document_ids=active_ids
         )

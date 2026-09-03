@@ -11,7 +11,7 @@ from collections.abc import Sequence
 import pytest
 
 from techdoc_rag.domain.chunk import Chunk, RetrievedChunk
-from techdoc_rag.domain.errors import RetrievalError
+from techdoc_rag.domain.errors import IndexingError, RetrievalError
 from techdoc_rag.query.retriever import Retriever
 
 
@@ -114,4 +114,24 @@ def test_저장소_실패는_RetrievalError로_올라간다() -> None:
     retriever = _retriever(store, active=["ls-m100-v1"])
 
     with pytest.raises(RetrievalError):
+        retriever.retrieve("질문")
+
+
+def test_질문_임베딩_실패는_RetrievalError로_변환된다() -> None:
+    """임베딩 어댑터는 IndexingError를 던지지만 질의 경로에서는 검색 실패다.
+    변환하지 않으면 HTTP 오류 매핑(503)에 안 걸려 500이 난다(실물 검증에서 발견)."""
+
+    class BrokenEmbedding:
+        def embed_query(self, text: str) -> list[float]:
+            raise IndexingError("임베딩 서버 접속 실패")
+
+    retriever = Retriever(
+        embedding_model=BrokenEmbedding(),
+        vector_store=FakeVectorStore([]),
+        repository=FakeRepository(["ls-m100-v1"]),
+        top_k=5,
+        similarity_threshold=0.0,
+    )
+
+    with pytest.raises(RetrievalError, match="질문 임베딩 실패"):
         retriever.retrieve("질문")
