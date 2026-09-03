@@ -17,7 +17,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from techdoc_rag.ui.chat_view import ApiError, DisplayCitation, ask_api, fetch_health, to_display
+from techdoc_rag.ui.chat_view import (
+    ApiError,
+    DisplayCitation,
+    _endpoint,
+    ask_api,
+    fetch_health,
+    to_display,
+)
 
 
 def _citation(used: bool) -> dict:
@@ -123,6 +130,13 @@ class _FakeApiHandler(BaseHTTPRequestHandler):
             self._reply(418, json.dumps({"detail": "알 수 없음"}))
         elif behavior == "html":
             self._reply(200, "<html>다른 서버입니다</html>")
+        elif behavior == "short_body":
+            # Content-Length가 실제 본문보다 큼 → 클라이언트가 IncompleteRead를 만난다.
+            self.send_response(200)
+            self.send_header("Content-Length", "9999")
+            self.end_headers()
+            self.wfile.write(b'{"partial')
+            self.close_connection = True
         else:
             self._reply(
                 200,
@@ -147,6 +161,8 @@ class _FakeApiHandler(BaseHTTPRequestHandler):
             self._reply(503, json.dumps({"detail": degraded}, ensure_ascii=False))
         elif behavior == "html":
             self._reply(200, "<html>다른 서버입니다</html>")
+        elif behavior == "bad_components":
+            self._reply(200, json.dumps({"status": "ok", "components": ["sqlite", "llm"]}))
         else:
             self._reply(200, json.dumps(payload, ensure_ascii=False))
 
@@ -186,11 +202,16 @@ def test_질문이_JSON으로_전송되고_응답이_dict로_온다(fake_api) ->
     assert fake_api.paths[-1] == "/chat"
 
 
-def test_끝_슬래시가_있어도_경로가_겹치지_않는다(fake_api) -> None:
-    """//chat이 되면 404가 나고 화면에는 URL 조합 실수가 서버 오류로 보인다."""
-    ask_api(_base_url(fake_api, trailing_slash=True), "질문", timeout_seconds=5)
+def test_끝_슬래시가_있어도_경로가_겹치지_않는다() -> None:
+    """//chat이 되면 404가 나고 화면에는 URL 조합 실수가 서버 오류로 보인다.
 
-    assert fake_api.paths[-1] == "/chat"
+    가짜 서버의 self.path로는 검증할 수 없다 — http.server가 //chat을 /chat으로
+    정규화해서, rstrip을 지워도 통과하는 공회전 테스트가 된다(리뷰 #30 재검토).
+    조합 결과를 직접 본다.
+    """
+    assert _endpoint("http://127.0.0.1:8000/", "chat") == "http://127.0.0.1:8000/chat"
+    assert _endpoint("http://127.0.0.1:8000", "chat") == "http://127.0.0.1:8000/chat"
+    assert _endpoint("http://127.0.0.1:8000///", "health") == "http://127.0.0.1:8000/health"
 
 
 def test_422는_질문_거부_문구가_된다(fake_api) -> None:
@@ -246,3 +267,31 @@ def test_health도_ApiError_외의_예외를_내보내지_않는다(fake_api) ->
 
     with pytest.raises(ApiError):
         fetch_health("http://127.0.0.1:9", timeout_seconds=2)
+
+
+def test_스키마가_어긋난_응답은_ApiError다() -> None:
+    """서버 버전이 어긋나면 KeyError·TypeError가 나는데, 호출부는 ApiError만
+    잡으므로 대화 영역에 스택트레이스가 뜬다(리뷰 #30 재검토)."""
+    with pytest.raises(ApiError, match="형식"):
+        to_display({"message": "예상 못 한 모양"})  # answered·text 없음
+
+    with pytest.raises(ApiError, match="형식"):
+        to_display({"text": "답", "answered": True, "citations": ["문자열 근거"]})
+
+
+def test_상태_응답의_components가_dict가_아니면_ApiError다(fake_api) -> None:
+    """사이드바는 페이지 최상위에서 이 결과를 순회한다 — AttributeError가 나면
+    사이드바가 아니라 페이지 전체가 죽는다(리뷰 #30 재검토에서 실측된 경로)."""
+    fake_api.behavior = "bad_components"
+
+    with pytest.raises(ApiError, match="components"):
+        fetch_health(_base_url(fake_api))
+
+
+def test_본문이_잘린_응답도_ApiError다(fake_api) -> None:
+    """Content-Length가 본문보다 크면 IncompleteRead가 나는데, 이것은
+    OSError 하위가 아니라 except 절을 그냥 빠져나갔다."""
+    fake_api.behavior = "short_body"
+
+    with pytest.raises(ApiError):
+        ask_api(_base_url(fake_api), "질문", timeout_seconds=5)

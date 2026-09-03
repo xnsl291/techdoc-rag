@@ -14,6 +14,7 @@ Streamlit 렌더링과 분리한 이유: 여기 있는 판단(answered=False면 
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -48,27 +49,36 @@ class DisplayAnswer:
 
 
 def to_display(response: dict) -> DisplayAnswer:
-    """API의 /chat 응답 JSON을 화면 표시용으로 바꾼다."""
-    citations = [
-        DisplayCitation(
-            label=_page_label(citation), is_used_in_answer=citation["is_used_in_answer"]
-        )
-        for citation in response.get("citations", [])
-    ]
-    if response["answered"]:
+    """API의 /chat 응답 JSON을 화면 표시용으로 바꾼다.
+
+    응답 모양이 계약과 다르면 ApiError로 바꾼다. KeyError·TypeError를 그대로
+    올리면 호출부가 ApiError만 잡고 있어 대화 영역에 스택트레이스가 뜬다
+    (리뷰 #30 재검토). 서버 버전이 어긋났을 때 실제로 도달하는 경로다.
+    """
+    try:
+        citations = [
+            DisplayCitation(
+                label=_page_label(citation), is_used_in_answer=citation["is_used_in_answer"]
+            )
+            for citation in response.get("citations") or []
+        ]
+        answered = response["answered"]
+        text = response["text"]
+    except (KeyError, TypeError) as error:
+        raise ApiError(
+            "API 응답 형식이 예상과 다릅니다. 서버와 화면의 버전이 맞는지 확인하세요."
+        ) from error
+
+    if answered:
         return DisplayAnswer(
-            answered=True,
-            text=response["text"],
-            notice=None,
-            ungrounded_text=None,
-            citations=citations,
+            answered=True, text=text, notice=None, ungrounded_text=None, citations=citations
         )
     reason = response.get("no_answer_reason") or ""
     return DisplayAnswer(
         answered=False,
         text=None,
         notice=_NO_ANSWER_NOTICES.get(reason, f"답변을 확인할 수 없습니다 ({reason})."),
-        ungrounded_text=response["text"] if reason == "NOT_GROUNDED" else None,
+        ungrounded_text=text if reason == "NOT_GROUNDED" else None,
         citations=citations,
     )
 
@@ -101,7 +111,10 @@ def ask_api(base_url: str, question: str, timeout_seconds: float) -> dict:
         if error.code == 503:
             raise ApiError(f"서버 구성요소 장애입니다: {detail}") from error
         raise ApiError(f"서버 오류 (HTTP {error.code}): {detail}") from error
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
+    except (OSError, http.client.HTTPException) as error:
+        # URLError·TimeoutError는 OSError 하위라 따로 적지 않는다. HTTPException은
+        # OSError가 아니어서 별도로 적는다 — Content-Length가 본문보다 큰 응답의
+        # IncompleteRead가 여기로 온다(리뷰 #30 재검토).
         raise ApiError(
             "API 서버에 연결할 수 없습니다. FastAPI가 떠 있는지 확인하세요 "
             f"({base_url})"
@@ -109,20 +122,34 @@ def ask_api(base_url: str, question: str, timeout_seconds: float) -> dict:
 
 
 def fetch_health(base_url: str, timeout_seconds: float = 5.0) -> dict:
-    """GET /health. 503(degraded)도 구성요소별 상태를 담아 돌려준다."""
+    """GET /health. 503(degraded)도 구성요소별 상태를 담아 돌려준다.
+
+    components가 dict인 것까지 확인한다. 사이드바는 페이지 최상위에서
+    이 결과를 순회하므로, 모양이 다르면 AttributeError가 나면서 사이드바가
+    아니라 페이지 전체가 죽는다(리뷰 #30 재검토에서 실측으로 확인된 경로).
+    """
     try:
         with urllib.request.urlopen(
             _endpoint(base_url, "health"), timeout=timeout_seconds
         ) as response:
-            return _decode(response.read())
+            return _as_health(_decode(response.read()))
     except urllib.error.HTTPError as error:
         # 503의 detail 안에 200과 같은 모양(status/components)이 들어 있다.
         detail = _read_json(error).get("detail")
         if isinstance(detail, dict):
-            return detail
+            return _as_health(detail)
         raise ApiError(f"상태 확인 실패 (HTTP {error.code})") from error
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
+    except (OSError, http.client.HTTPException) as error:
         raise ApiError("API 서버에 연결할 수 없습니다.") from error
+
+
+def _as_health(body: dict) -> dict:
+    components = body.get("components")
+    if components is not None and not isinstance(components, dict):
+        raise ApiError(
+            f"상태 응답 형식이 예상과 다릅니다: components가 {type(components).__name__}"
+        )
+    return body
 
 
 def _endpoint(base_url: str, path: str) -> str:
@@ -152,6 +179,6 @@ def _read_json(error: urllib.error.HTTPError) -> dict:
     """오류 본문을 dict로. 읽을 수 없으면 빈 dict — 여기서 또 실패하면 안 된다."""
     try:
         body = json.loads(error.read())
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, http.client.HTTPException):
         return {}
     return body if isinstance(body, dict) else {}
