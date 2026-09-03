@@ -43,7 +43,15 @@ chunking:
 
 retrieval:
   top_k: 5                          # [미확정, 시작점]
-  similarity_threshold: 0.0         # [미확정, 시작점] 0이면 임계값 적용 안 함
+  similarity_threshold: 0.0         # [미확정, 시작점] 사실상 거르지 않음(코사인은 음수 가능)
+  # 프롬프트에 넣는 근거의 문자 수 예산. 토큰이 아닌 이유는 chunking 주석과 같음.
+  # [미확정, 시작점] top_k 5 × 최대 청크 1,350자 + 여유. num_ctx 8192토큰 안에 듦.
+  context_budget_chars: 7200
+
+api:
+  # [미확정, 시작점] 질문 길이 상한. 프롬프트 예산 보호용이며 평가셋의 실제
+  # 질문 길이 분포를 보고 조정한다.
+  max_question_chars: 1000
 
 prompt:
   version: "v1"                     # 답변 재현성 추적용

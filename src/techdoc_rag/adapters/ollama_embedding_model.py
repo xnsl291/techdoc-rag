@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import threading
 from collections.abc import Sequence
 from urllib.parse import urlsplit
 
@@ -54,6 +55,11 @@ class OllamaEmbeddingModel:
         self._timeout_seconds = timeout_seconds
         self._connection: http.client.HTTPConnection | None = None
         self._dimension: int | None = None
+        # 단일 커넥션 재사용 구조라 요청 전체를 직렬화한다. FastAPI 스레드풀이
+        # embed_query를 동시에 부르면(#27) 잠금 없이는 두 요청이 한 소켓에 섞여
+        # 다른 질문의 벡터가 조용히 반환될 수 있다(리뷰 #28 B1). 질의 임베딩이
+        # 87ms 실측이라 직렬화 비용은 생성(수십 초) 대비 무의미하다.
+        self._request_lock = threading.Lock()
 
     @property
     def model_name(self) -> str:
@@ -113,7 +119,8 @@ class OllamaEmbeddingModel:
             }
         ).encode("utf-8")
 
-        body = self._send_with_retry_once(payload)
+        with self._request_lock:
+            body = self._send_with_retry_once(payload)
         try:
             embeddings = body["embeddings"]
         except (KeyError, TypeError) as exc:

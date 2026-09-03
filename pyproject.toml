@@ -15,10 +15,14 @@ dependencies = [
     "pypdfium2>=5.13",
     # 벡터 저장소. 로컬 모드(:memory:)를 지원해 테스트에 서버가 필요 없다.
     "qdrant-client>=1.12",
+    # HTTP 경계(#27). pydantic 검증은 fastapi가 끌고 온다.
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "httpx2>=0.1",   # fastapi TestClient가 요구 (구 httpx는 starlette에서 deprecated)
     "psutil>=7.0",   # scripts/benchmark_llm.py의 RAM peak 측정
     "pytest>=8.0",
     "ruff>=0.6",

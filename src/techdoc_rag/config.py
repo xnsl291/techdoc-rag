@@ -56,6 +56,12 @@ class ChunkingSettings:
 class RetrievalSettings:
     top_k: int
     similarity_threshold: float
+    context_budget_chars: int
+
+
+@dataclass(frozen=True, slots=True)
+class ApiSettings:
+    max_question_chars: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +81,7 @@ class Settings:
     chunking: ChunkingSettings
     indexing: IndexingSettings
     retrieval: RetrievalSettings
+    api: ApiSettings
     storage: StorageSettings
     prompt_version: str
 
@@ -150,6 +157,14 @@ def load_settings(settings_path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
             top_k=int(_require(retrieval_section, "top_k", "retrieval")),
             similarity_threshold=float(
                 _require(retrieval_section, "similarity_threshold", "retrieval")
+            ),
+            context_budget_chars=int(
+                _require(retrieval_section, "context_budget_chars", "retrieval")
+            ),
+        ),
+        api=ApiSettings(
+            max_question_chars=int(
+                _require(raw.get("api", {}), "max_question_chars", "api")
             ),
         ),
         storage=StorageSettings(
