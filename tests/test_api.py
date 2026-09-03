@@ -12,7 +12,11 @@ from fastapi.testclient import TestClient
 
 from techdoc_rag.api.app import create_app
 from techdoc_rag.domain.answer import Answer, Citation, NoAnswerReason
-from techdoc_rag.domain.errors import GenerationError, RetrievalError
+from techdoc_rag.domain.errors import (
+    GenerationError,
+    MetadataStoreError,
+    RetrievalError,
+)
 
 
 class FakeChatService:
@@ -97,7 +101,14 @@ def test_No_answer는_오류가_아니라_200이다() -> None:
     assert body["no_answer_reason"] == "NOT_GROUNDED"
 
 
-@pytest.mark.parametrize("error", [RetrievalError("Qdrant 접근 불가"), GenerationError("LLM 다운")])
+@pytest.mark.parametrize(
+    "error",
+    [
+        RetrievalError("Qdrant 접근 불가"),
+        GenerationError("LLM 다운"),
+        MetadataStoreError("SQLite 잠김"),
+    ],
+)
 def test_장애는_503이다(error: Exception) -> None:
     """장애가 No-answer(200)로 둔갑하면 감시가 품질 문제와 장애를 구분 못 한다(D-005)."""
     client = _client(FakeChatService(error=error))
