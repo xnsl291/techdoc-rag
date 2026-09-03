@@ -7,6 +7,10 @@ Streamlit은 기본값 0.0.0.0으로 열면서 오류를 내지 않는다. 인�
 
 조립과 우선순위 규칙은 techdoc_rag.ui.launcher에 있고 테스트가 지킨다.
 
+패키지가 설치돼 있어야 한다(`pip install -e .`). sys.path를 여기서 손대지 않는
+이유는, 그렇게 해도 자식 프로세스인 streamlit에는 전달되지 않아 "런처는 뜨는데
+화면이 ModuleNotFoundError로 죽는" 어긋난 상태가 되기 때문이다(리뷰 #30 4차).
+
 사용:
     python scripts/run_ui.py                    # http://127.0.0.1:8501
     python scripts/run_ui.py --server.port=8600
@@ -17,15 +21,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from techdoc_rag.ui.launcher import (  # noqa: E402
-    ADDRESS,
-    build_command,
-    build_environment,
-)
+from techdoc_rag.ui.launcher import ADDRESS, build_command, build_environment
 
 
 def main() -> int:

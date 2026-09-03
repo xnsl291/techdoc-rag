@@ -130,6 +130,10 @@ class _FakeApiHandler(BaseHTTPRequestHandler):
             self._reply(418, json.dumps({"detail": "알 수 없음"}))
         elif behavior == "html":
             self._reply(200, "<html>다른 서버입니다</html>")
+        elif behavior == "deep_json":
+            self._reply(200, "[" * 3000 + "]" * 3000)
+        elif behavior == "array_body":
+            self._reply(200, "[1, 2, 3]")
         elif behavior == "short_body":
             # Content-Length가 실제 본문보다 큼 → 클라이언트가 IncompleteRead를 만난다.
             self.send_response(200)
@@ -163,6 +167,18 @@ class _FakeApiHandler(BaseHTTPRequestHandler):
             self._reply(200, "<html>다른 서버입니다</html>")
         elif behavior == "bad_components":
             self._reply(200, json.dumps({"status": "ok", "components": ["sqlite", "llm"]}))
+        elif behavior == "error_deep_json":
+            self._reply(503, "[" * 3000 + "]" * 3000)
+        elif behavior == "error_huge_int":
+            self._reply(503, '{"detail": ' + "1" * 5000 + "}")
+        elif behavior == "error_array":
+            self._reply(503, "[1, 2]")
+        elif behavior == "error_short_body":
+            self.send_response(503)
+            self.send_header("Content-Length", "9999")
+            self.end_headers()
+            self.wfile.write(b'{"detail"')
+            self.close_connection = True
         elif behavior == "null_components":
             self._reply(200, json.dumps({"status": "ok", "components": None}))
         elif behavior == "degraded_bad_components":
@@ -353,3 +369,38 @@ def test_주소가_잘못돼도_ApiError다(base_url: str) -> None:
 
     with pytest.raises(ApiError):
         fetch_health(base_url, timeout_seconds=2)
+
+
+def test_깊이_중첩된_응답도_ApiError다(fake_api) -> None:
+    """RecursionError는 RuntimeError 하위라 ValueError 계열 except에 안 걸린다.
+    fetch_health로 들어오면 사이드바에서 페이지 전체가 죽는다(리뷰 #30 4차)."""
+    fake_api.behavior = "deep_json"
+
+    with pytest.raises(ApiError, match="이해할 수 없습니다"):
+        ask_api(_base_url(fake_api), "질문", timeout_seconds=5)
+
+
+def test_JSON_배열_응답도_ApiError다(fake_api) -> None:
+    """dict가 아닌 최상위 값을 통과시키면 to_display에서 AttributeError가 난다."""
+    fake_api.behavior = "array_body"
+
+    with pytest.raises(ApiError, match="형식"):
+        ask_api(_base_url(fake_api), "질문", timeout_seconds=5)
+
+
+@pytest.mark.parametrize(
+    "behavior", ["error_deep_json", "error_huge_int", "error_array", "error_short_body"]
+)
+def test_오류_본문을_못_읽어도_ApiError로_끝난다(fake_api, behavior: str) -> None:
+    """오류 본문 파싱은 HTTPError 핸들러 '안에서' 일어난다 — 여기서 예외가 나면
+    바깥 except가 못 받고 그대로 샌다. 본문은 부가 정보이므로 삼키고 상태만 알린다."""
+    fake_api.behavior = behavior
+
+    with pytest.raises(ApiError, match="상태 확인 실패"):
+        fetch_health(_base_url(fake_api), timeout_seconds=5)
+
+
+def test_짝_없는_서로게이트_질문도_ApiError다(fake_api) -> None:
+    """본문 인코딩이 try 밖에 있으면 UnicodeEncodeError만 예외 변환을 비껴간다."""
+    with pytest.raises(ApiError):
+        ask_api(_base_url(fake_api), "질문\ud800", timeout_seconds=5)

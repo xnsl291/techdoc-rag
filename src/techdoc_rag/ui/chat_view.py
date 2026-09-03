@@ -10,6 +10,11 @@ Streamlit 렌더링과 분리한 이유: 여기 있는 판단(answered=False면 
 **여기서 나가는 예외는 ApiError뿐이어야 한다.** 사이드바의 상태 조회는
 모듈 최상위에서 실행되므로, 다른 예외가 새면 사이드바가 아니라 페이지
 전체가 죽는다(리뷰 #30 M3).
+
+이 보증은 "이 모듈의 공개 함수에 어떤 응답이 와도"까지다 — 주소 오설정,
+서버 버전 불일치, JSON이 아닌 응답, 잘린 본문, 깊이 중첩·거대 정수 응답을
+변형 테스트로 확인했다. to_display에 dict가 아닌 값을 직접 넣는 것처럼
+이 모듈을 계약 밖으로 부르는 경우는 범위가 아니다.
 """
 
 from __future__ import annotations
@@ -96,10 +101,11 @@ def _page_label(citation: dict) -> str:
 
 def ask_api(base_url: str, question: str, timeout_seconds: float) -> dict:
     """POST /chat. 실패는 화면에 보여줄 문구를 담은 ApiError로 바꾼다."""
-    payload = json.dumps({"question": question}, ensure_ascii=False).encode("utf-8")
     try:
-        # Request 생성도 try 안에 둔다. 주소에 scheme이 없으면 여기서 ValueError가
-        # 나는데, 밖에 두면 그것만 예외 변환을 비껴간다(내 테스트가 잡음).
+        # 본문 조립과 Request 생성도 try 안에 둔다. 주소에 scheme이 없으면 여기서
+        # ValueError가, 질문에 짝 없는 서로게이트가 있으면 인코딩에서
+        # UnicodeEncodeError가 난다. 밖에 두면 그것만 예외 변환을 비껴간다.
+        payload = json.dumps({"question": question}, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             _endpoint(base_url, "chat"),
             data=payload,
@@ -181,7 +187,11 @@ def _decode(raw: bytes) -> dict:
     """
     try:
         body = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+    except (ValueError, RecursionError) as error:
+        # JSONDecodeError·UnicodeDecodeError는 ValueError 하위이고, 4,300자리를
+        # 넘는 정수 리터럴도 평범한 ValueError로 온다. RecursionError는
+        # RuntimeError 하위라 따로 적어야 한다 — 깊이 3,000쯤 중첩된 6KB 응답이면
+        # 여기서 나고, 그대로 새면 사이드바에서 페이지 전체가 죽는다(리뷰 #30 4차).
         raise ApiError(
             "API 응답을 이해할 수 없습니다. 주소가 이 서비스의 것이 맞는지 확인하세요."
         ) from error
@@ -194,6 +204,9 @@ def _read_json(error: urllib.error.HTTPError) -> dict:
     """오류 본문을 dict로. 읽을 수 없으면 빈 dict — 여기서 또 실패하면 안 된다."""
     try:
         body = json.loads(error.read())
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError, http.client.HTTPException):
+    except (ValueError, RecursionError, OSError, http.client.HTTPException):
+        # 이 함수는 HTTPError 핸들러 '안에서' 불린다 — 여기서 예외가 나면
+        # 바깥 except가 받지 못하고 그대로 샌다. 오류 본문은 부가 정보이므로
+        # 읽기 실패는 빈 dict로 삼킨다(리뷰 #30 4차).
         return {}
     return body if isinstance(body, dict) else {}
