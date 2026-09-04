@@ -82,12 +82,27 @@ CREATE INDEX IF NOT EXISTS ix_documents_status ON documents (status);
 
 
 # 스키마가 최신인지 확인하는 데 쓴다. 새로 추가한 컬럼만 담는다.
-_EXPECTED_COLUMNS = {
-    "owner_id",
-    "lease_until",
-    "failed_page_count",
-    "pages_without_text_layer",
-}
+def _columns_from_schema(schema: str) -> frozenset[str]:
+    """CREATE TABLE documents 본문에서 컬럼 이름을 뽑는다.
+
+    손으로 관리하던 목록은 최근 추가분 4개만 담고 있어서 더 옛날 스키마가
+    그대로 통과했다(리뷰 이관 #21). 목록을 또 손으로 늘리면 같은 일이
+    반복되므로 스키마 문자열에서 유도한다.
+    """
+    body = schema.split("CREATE TABLE IF NOT EXISTS documents (", 1)[1]
+    body = body.split(");", 1)[0]
+    columns = set()
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line.startswith("--") or line.startswith(("UNIQUE", "PRIMARY", "CHECK")):
+            continue
+        name = line.split()[0]
+        if name.isidentifier():
+            columns.add(name)
+    return frozenset(columns)
+
+
+_EXPECTED_COLUMNS = _columns_from_schema(_SCHEMA)
 
 
 def _to_iso(moment: datetime) -> str:
@@ -146,25 +161,31 @@ class SqliteDocumentRepository:
         CREATE TABLE IF NOT EXISTS는 기존 테이블에 컬럼을 더하지 않는다.
         옛 스키마로 만든 DB에 그대로 붙으면 첫 상태 갱신에서 no such column이
         SQL 오류로 감싸져 나와 원인을 알 수 없다. 여기서 끊는다.
+
+        컬럼 검사를 스키마 실행보다 **먼저** 한다. 나중에 하면 스크립트 안의
+        인덱스 생성이 먼저 터져 "no such column: is_active"가 나가고, 정작
+        도움이 되는 안내("옛 스키마니 파일을 지우라")는 도달하지 못한다
+        (테스트를 붙이면서 발견, 리뷰 이관 #21).
         """
         with self._connect() as connection:
+            existing = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(documents)").fetchall()
+            }
+            if existing:  # 테이블이 이미 있을 때만 검사한다. 새 DB는 아래에서 만든다
+                missing = _EXPECTED_COLUMNS - existing
+                if missing:
+                    raise MetadataStoreError(
+                        f"documents 테이블에 컬럼이 없음: {sorted(missing)}. "
+                        f"옛 스키마로 만든 DB임. 개발 중이면 파일을 지우고 다시 만들 것"
+                    )
+
             try:
                 connection.execute("PRAGMA journal_mode=WAL")
                 connection.executescript(_SCHEMA)
                 connection.commit()
             except sqlite3.Error as exc:
                 raise MetadataStoreError(f"스키마 생성 실패: {exc}") from exc
-
-            existing = {
-                row["name"]
-                for row in connection.execute("PRAGMA table_info(documents)").fetchall()
-            }
-            missing = _EXPECTED_COLUMNS - existing
-            if missing:
-                raise MetadataStoreError(
-                    f"documents 테이블에 컬럼이 없음: {sorted(missing)}. "
-                    f"옛 스키마로 만든 DB임. 개발 중이면 파일을 지우고 다시 만들 것"
-                )
 
     def register(self, document: Document) -> None:
         """문서를 등록한다.
