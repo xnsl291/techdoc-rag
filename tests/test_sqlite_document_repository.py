@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -527,3 +528,35 @@ def test_소유자가_다르면_메시지에_소유자가_나온다(
     message = str(caught.value)
     assert "host-a" in message  # 실제 소유자를 알려준다
     assert "INDEXING" in message  # 상태는 정상이었다는 것도 함께
+
+
+def test_읽기_실패도_MetadataStoreError로_감싸진다(tmp_path: Path) -> None:
+    """커넥션 실패만 감싸고 조회 오류는 sqlite3.Error 그대로 내보내던
+    비대칭이 있었다. 호출자는 저장소 종류를 모르는데 sqlite3 예외를 받았다."""
+    repository = SqliteDocumentRepository(tmp_path / "metadata.db")
+    repository.initialize()
+    # 테이블을 지워 조회 자체가 실패하게 만든다.
+    connection = sqlite3.connect(tmp_path / "metadata.db")
+    connection.execute("DROP TABLE documents")
+    connection.commit()
+    connection.close()
+
+    for call in (
+        lambda: repository.get("v1"),
+        lambda: repository.find_by_sha256("manual-g100", "a" * 64),
+        lambda: repository.find_sha256_across_series("a" * 64),
+        lambda: repository.active_document_ids(),
+    ):
+        with pytest.raises(MetadataStoreError, match="조회 실패"):
+            call()
+
+
+def test_naive_datetime은_저장소_예외로_거부된다(
+    repository: SqliteDocumentRepository,
+) -> None:
+    """raw ValueError를 던지면 저장소 오류를 잡는 쪽이 못 받는다."""
+    naive = _document(document_id="v1")
+    naive = replace(naive, created_at=datetime(2026, 9, 4, 12, 0, 0))  # tzinfo 없음
+
+    with pytest.raises(MetadataStoreError, match="aware"):
+        repository.register(naive)
