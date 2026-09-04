@@ -113,7 +113,10 @@ def _to_iso(moment: datetime) -> str:
     timespec을 고정해 모든 값의 형식을 같게 만든다.
     """
     if moment.tzinfo is None:
-        raise ValueError("시각은 UTC aware여야 함. datetime.now(UTC)를 쓸 것")
+        # 도메인 예외 계층에 맞춘다. Document가 aware를 강제하지 않으므로
+        # 호출자가 naive를 넘길 수 있는데, 그때 raw ValueError가 나가면
+        # 저장소 오류를 잡는 쪽이 못 받는다(리뷰 이관 #21).
+        raise MetadataStoreError("시각은 UTC aware여야 함. datetime.now(UTC)를 쓸 것")
     return moment.astimezone(UTC).isoformat(timespec="microseconds")
 
 
@@ -254,18 +257,16 @@ class SqliteDocumentRepository:
                 raise MetadataStoreError(f"문서 등록 실패: {exc}") from exc
 
     def get(self, document_id: str) -> Document | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM documents WHERE document_id = ?", (document_id,)
-            ).fetchone()
+        row = self._fetch_one(
+            "SELECT * FROM documents WHERE document_id = ?", (document_id,)
+        )
         return _to_document(row) if row else None
 
     def find_by_sha256(self, logical_document_id: str, sha256: str) -> Document | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM documents WHERE logical_document_id = ? AND sha256 = ?",
-                (logical_document_id, sha256),
-            ).fetchone()
+        row = self._fetch_one(
+            "SELECT * FROM documents WHERE logical_document_id = ? AND sha256 = ?",
+            (logical_document_id, sha256),
+        )
         return _to_document(row) if row else None
 
     def find_sha256_across_series(self, sha256: str) -> list[Document]:
@@ -278,11 +279,10 @@ class SqliteDocumentRepository:
         여기서 막지 않고 알리기만 한다. 같은 PDF가 두 제품에 공용으로 쓰이는
         정당한 경우가 있어서, 등록을 거부할지는 색인 서비스가 정한다.
         """
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM documents WHERE sha256 = ? ORDER BY logical_document_id",
-                (sha256,),
-            ).fetchall()
+        rows = self._fetch_all(
+            "SELECT * FROM documents WHERE sha256 = ? ORDER BY logical_document_id",
+            (sha256,),
+        )
         return [_to_document(row) for row in rows]
 
     def record_parse_result(
@@ -466,12 +466,31 @@ class SqliteDocumentRepository:
                 raise MetadataStoreError(f"활성 전환 실패: {document_id} ({exc})") from exc
 
     def active_document_ids(self) -> list[str]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT document_id FROM documents WHERE is_active = 1 AND status = ?",
-                (DocumentStatus.READY.value,),
-            ).fetchall()
+        rows = self._fetch_all(
+            "SELECT document_id FROM documents WHERE is_active = 1 AND status = ?",
+            (DocumentStatus.READY.value,),
+        )
         return [row["document_id"] for row in rows]
+
+    def _fetch_one(self, sql: str, parameters: tuple) -> sqlite3.Row | None:
+        """읽기도 저장소 예외로 감싼다.
+
+        커넥션 실패만 MetadataStoreError로 감싸고 조회 오류는 sqlite3.Error
+        그대로 내보내던 비대칭이 있었다(리뷰 이관 #21). 호출자는 저장소 종류를
+        모르는데 sqlite3 예외를 받게 된다.
+        """
+        with self._connect() as connection:
+            try:
+                return connection.execute(sql, parameters).fetchone()
+            except sqlite3.Error as exc:
+                raise MetadataStoreError(f"조회 실패: {exc}") from exc
+
+    def _fetch_all(self, sql: str, parameters: tuple) -> list[sqlite3.Row]:
+        with self._connect() as connection:
+            try:
+                return connection.execute(sql, parameters).fetchall()
+            except sqlite3.Error as exc:
+                raise MetadataStoreError(f"조회 실패: {exc}") from exc
 
     def recover_abandoned_indexing(self, owner_id: str | None = None) -> list[str]:
         """버려진 INDEXING 문서를 INDEX_FAILED로 강등한다.
