@@ -560,3 +560,47 @@ def test_naive_datetime은_저장소_예외로_거부된다(
 
     with pytest.raises(MetadataStoreError, match="aware"):
         repository.register(naive)
+
+
+def test_lease_until도_같은_시각_형식이다(
+    repository: SqliteDocumentRepository, tmp_path: Path
+) -> None:
+    """`_to_iso`의 존재 근거가 바로 이 컬럼의 사전순 비교인데, 정작 형식
+    검증에서 빠져 있었다(리뷰 이관 #21). mark_ready 이후에는 NULL이 되므로
+    mark_indexing 직후에 봐야 한다."""
+    import re
+
+    repository.register(_document(document_id="doc-1"))
+    repository.mark_indexing("doc-1", owner_id="host-1", lease_seconds=300)
+
+    pattern = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+00:00$")
+    raw_connection = sqlite3.connect(tmp_path / "metadata.db")
+    row = raw_connection.execute(
+        "SELECT lease_until FROM documents WHERE document_id = 'doc-1'"
+    ).fetchone()
+    raw_connection.close()
+
+    assert row[0] is not None
+    assert pattern.match(row[0]), f"형식 불일치: {row[0]}"
+
+
+def test_리스_만료_비교가_같은_초에서도_뒤집히지_않는다(
+    repository: SqliteDocumentRepository, tmp_path: Path
+) -> None:
+    """마이크로초가 있는 값과 없는 값이 섞이면 `.`(0x2E) > `+`(0x2B)라
+    같은 초에서 순서가 뒤집힌다 — 그게 형식을 고정한 이유다.
+    옛 형식(마이크로초 없음)을 직접 넣어 비교가 어떻게 되는지 고정해 둔다."""
+    repository.register(_document(document_id="doc-1"))
+    repository.mark_indexing("doc-1", owner_id="host-1", lease_seconds=300)
+
+    raw_connection = sqlite3.connect(tmp_path / "metadata.db")
+    stored = raw_connection.execute(
+        "SELECT lease_until FROM documents WHERE document_id = 'doc-1'"
+    ).fetchone()[0]
+    raw_connection.close()
+
+    same_second_without_micros = stored[:19] + "+00:00"
+    # 사전순으로는 마이크로초 있는 쪽이 항상 크다. 두 형식이 섞이면
+    # "아직 안 만료됐는데 만료로 보이는" 판정이 나온다.
+    assert same_second_without_micros < stored
+    assert len(stored) == len("2026-09-04T00:00:00.000000+00:00")
