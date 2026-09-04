@@ -82,12 +82,27 @@ CREATE INDEX IF NOT EXISTS ix_documents_status ON documents (status);
 
 
 # 스키마가 최신인지 확인하는 데 쓴다. 새로 추가한 컬럼만 담는다.
-_EXPECTED_COLUMNS = {
-    "owner_id",
-    "lease_until",
-    "failed_page_count",
-    "pages_without_text_layer",
-}
+def _columns_from_schema(schema: str) -> frozenset[str]:
+    """CREATE TABLE documents 본문에서 컬럼 이름을 뽑는다.
+
+    손으로 관리하던 목록은 최근 추가분 4개만 담고 있어서 더 옛날 스키마가
+    그대로 통과했다(리뷰 이관 #21). 목록을 또 손으로 늘리면 같은 일이
+    반복되므로 스키마 문자열에서 유도한다.
+    """
+    body = schema.split("CREATE TABLE IF NOT EXISTS documents (", 1)[1]
+    body = body.split(");", 1)[0]
+    columns = set()
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line.startswith("--") or line.startswith(("UNIQUE", "PRIMARY", "CHECK")):
+            continue
+        name = line.split()[0]
+        if name.isidentifier():
+            columns.add(name)
+    return frozenset(columns)
+
+
+_EXPECTED_COLUMNS = _columns_from_schema(_SCHEMA)
 
 
 def _to_iso(moment: datetime) -> str:
@@ -98,7 +113,10 @@ def _to_iso(moment: datetime) -> str:
     timespec을 고정해 모든 값의 형식을 같게 만든다.
     """
     if moment.tzinfo is None:
-        raise ValueError("시각은 UTC aware여야 함. datetime.now(UTC)를 쓸 것")
+        # 도메인 예외 계층에 맞춘다. Document가 aware를 강제하지 않으므로
+        # 호출자가 naive를 넘길 수 있는데, 그때 raw ValueError가 나가면
+        # 저장소 오류를 잡는 쪽이 못 받는다(리뷰 이관 #21).
+        raise MetadataStoreError("시각은 UTC aware여야 함. datetime.now(UTC)를 쓸 것")
     return moment.astimezone(UTC).isoformat(timespec="microseconds")
 
 
@@ -146,25 +164,31 @@ class SqliteDocumentRepository:
         CREATE TABLE IF NOT EXISTS는 기존 테이블에 컬럼을 더하지 않는다.
         옛 스키마로 만든 DB에 그대로 붙으면 첫 상태 갱신에서 no such column이
         SQL 오류로 감싸져 나와 원인을 알 수 없다. 여기서 끊는다.
+
+        컬럼 검사를 스키마 실행보다 **먼저** 한다. 나중에 하면 스크립트 안의
+        인덱스 생성이 먼저 터져 "no such column: is_active"가 나가고, 정작
+        도움이 되는 안내("옛 스키마니 파일을 지우라")는 도달하지 못한다
+        (테스트를 붙이면서 발견, 리뷰 이관 #21).
         """
         with self._connect() as connection:
+            existing = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(documents)").fetchall()
+            }
+            if existing:  # 테이블이 이미 있을 때만 검사한다. 새 DB는 아래에서 만든다
+                missing = _EXPECTED_COLUMNS - existing
+                if missing:
+                    raise MetadataStoreError(
+                        f"documents 테이블에 컬럼이 없음: {sorted(missing)}. "
+                        f"옛 스키마로 만든 DB임. 개발 중이면 파일을 지우고 다시 만들 것"
+                    )
+
             try:
                 connection.execute("PRAGMA journal_mode=WAL")
                 connection.executescript(_SCHEMA)
                 connection.commit()
             except sqlite3.Error as exc:
                 raise MetadataStoreError(f"스키마 생성 실패: {exc}") from exc
-
-            existing = {
-                row["name"]
-                for row in connection.execute("PRAGMA table_info(documents)").fetchall()
-            }
-            missing = _EXPECTED_COLUMNS - existing
-            if missing:
-                raise MetadataStoreError(
-                    f"documents 테이블에 컬럼이 없음: {sorted(missing)}. "
-                    f"옛 스키마로 만든 DB임. 개발 중이면 파일을 지우고 다시 만들 것"
-                )
 
     def register(self, document: Document) -> None:
         """문서를 등록한다.
@@ -233,18 +257,16 @@ class SqliteDocumentRepository:
                 raise MetadataStoreError(f"문서 등록 실패: {exc}") from exc
 
     def get(self, document_id: str) -> Document | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM documents WHERE document_id = ?", (document_id,)
-            ).fetchone()
+        row = self._fetch_one(
+            "SELECT * FROM documents WHERE document_id = ?", (document_id,)
+        )
         return _to_document(row) if row else None
 
     def find_by_sha256(self, logical_document_id: str, sha256: str) -> Document | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM documents WHERE logical_document_id = ? AND sha256 = ?",
-                (logical_document_id, sha256),
-            ).fetchone()
+        row = self._fetch_one(
+            "SELECT * FROM documents WHERE logical_document_id = ? AND sha256 = ?",
+            (logical_document_id, sha256),
+        )
         return _to_document(row) if row else None
 
     def find_sha256_across_series(self, sha256: str) -> list[Document]:
@@ -257,11 +279,10 @@ class SqliteDocumentRepository:
         여기서 막지 않고 알리기만 한다. 같은 PDF가 두 제품에 공용으로 쓰이는
         정당한 경우가 있어서, 등록을 거부할지는 색인 서비스가 정한다.
         """
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM documents WHERE sha256 = ? ORDER BY logical_document_id",
-                (sha256,),
-            ).fetchall()
+        rows = self._fetch_all(
+            "SELECT * FROM documents WHERE sha256 = ? ORDER BY logical_document_id",
+            (sha256,),
+        )
         return [_to_document(row) for row in rows]
 
     def record_parse_result(
@@ -445,12 +466,31 @@ class SqliteDocumentRepository:
                 raise MetadataStoreError(f"활성 전환 실패: {document_id} ({exc})") from exc
 
     def active_document_ids(self) -> list[str]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT document_id FROM documents WHERE is_active = 1 AND status = ?",
-                (DocumentStatus.READY.value,),
-            ).fetchall()
+        rows = self._fetch_all(
+            "SELECT document_id FROM documents WHERE is_active = 1 AND status = ?",
+            (DocumentStatus.READY.value,),
+        )
         return [row["document_id"] for row in rows]
+
+    def _fetch_one(self, sql: str, parameters: tuple) -> sqlite3.Row | None:
+        """읽기도 저장소 예외로 감싼다.
+
+        커넥션 실패만 MetadataStoreError로 감싸고 조회 오류는 sqlite3.Error
+        그대로 내보내던 비대칭이 있었다(리뷰 이관 #21). 호출자는 저장소 종류를
+        모르는데 sqlite3 예외를 받게 된다.
+        """
+        with self._connect() as connection:
+            try:
+                return connection.execute(sql, parameters).fetchone()
+            except sqlite3.Error as exc:
+                raise MetadataStoreError(f"조회 실패: {exc}") from exc
+
+    def _fetch_all(self, sql: str, parameters: tuple) -> list[sqlite3.Row]:
+        with self._connect() as connection:
+            try:
+                return connection.execute(sql, parameters).fetchall()
+            except sqlite3.Error as exc:
+                raise MetadataStoreError(f"조회 실패: {exc}") from exc
 
     def recover_abandoned_indexing(self, owner_id: str | None = None) -> list[str]:
         """버려진 INDEXING 문서를 INDEX_FAILED로 강등한다.
