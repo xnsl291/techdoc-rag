@@ -448,3 +448,34 @@ def test_저장된_모든_시각이_같은_형식이다(
     for value in row:
         assert value is not None
         assert pattern.match(value), f"형식 불일치: {value}"
+
+
+def test_스키마_가드가_모든_컬럼을_본다(tmp_path: Path) -> None:
+    """목록을 손으로 관리하면 또 빠진다 — 최근 추가분 4개만 보던 것을
+    스키마 문자열에서 유도하도록 바꿨다(리뷰 이관 #21)."""
+    from techdoc_rag.adapters.sqlite_document_repository import _EXPECTED_COLUMNS
+
+    # 스키마에 실제로 있는 컬럼 수와 같아야 한다. 몇 개만 담고 있으면 안 된다.
+    assert len(_EXPECTED_COLUMNS) > 20
+    assert {"document_id", "status", "created_at", "chunk_count"} <= _EXPECTED_COLUMNS
+
+
+def test_옛_스키마로_만든_DB는_거부한다(tmp_path: Path) -> None:
+    """CREATE TABLE IF NOT EXISTS는 기존 테이블에 컬럼을 더하지 않는다.
+    그대로 붙으면 첫 상태 갱신에서 no such column이 SQL 오류로 나와 원인을 모른다."""
+    database_path = tmp_path / "old.db"
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        """
+        CREATE TABLE documents (
+            document_id TEXT PRIMARY KEY,
+            logical_document_id TEXT NOT NULL,
+            status TEXT NOT NULL
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(MetadataStoreError, match="컬럼이 없음"):
+        SqliteDocumentRepository(database_path).initialize()
