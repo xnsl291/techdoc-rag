@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -479,3 +480,50 @@ def test_옛_스키마로_만든_DB는_거부한다(tmp_path: Path) -> None:
 
     with pytest.raises(MetadataStoreError, match="컬럼이 없음"):
         SqliteDocumentRepository(database_path).initialize()
+
+
+def test_다른_계열에_같은_해시가_있으면_경고가_남는다(
+    repository: SqliteDocumentRepository, caplog
+) -> None:
+    """이슈 #14의 완료 기준인데 검증되지 않았다. 계열 ID 오타로 같은 파일이
+    두 계열에 들어가면 둘 다 활성이 되어 같은 근거가 두 번 검색된다."""
+    same_hash = "e" * 64
+    repository.register(_document(document_id="v1", sha256=same_hash))
+
+    with caplog.at_level(logging.WARNING):
+        repository.register(
+            _document(document_id="typo", logical_document_id="ls-g100x", sha256=same_hash)
+        )
+
+    assert any("같은 해시가 다른 계열에" in record.message for record in caplog.records)
+    warning = next(r for r in caplog.records if "같은 해시가 다른 계열에" in r.message)
+    assert same_hash[:12] in warning.getMessage()  # 어느 해시인지 알려준다
+
+
+def test_같은_계열_안에서는_경고하지_않는다(
+    repository: SqliteDocumentRepository, caplog
+) -> None:
+    """같은 계열의 중복은 UNIQUE 제약이 막는다 — 경고 대상이 아니다."""
+    repository.register(_document(document_id="v1", sha256="f" * 64))
+
+    with caplog.at_level(logging.WARNING), pytest.raises(MetadataStoreError):
+        repository.register(_document(document_id="v1-again", sha256="f" * 64))
+
+    assert not [r for r in caplog.records if "같은 해시가 다른 계열에" in r.message]
+
+
+def test_소유자가_다르면_메시지에_소유자가_나온다(
+    repository: SqliteDocumentRepository,
+) -> None:
+    """복구가 이미 강등한 문서를 잃은 프로세스가 되살리는 것을 막는 자리다.
+    실패 사유가 '상태 때문'인지 '소유자 때문'인지 구분돼야 한다."""
+    repository.register(_document(document_id="v1"))
+    repository.mark_indexing("v1", owner_id="host-a", lease_seconds=300)
+
+    with pytest.raises(MetadataStoreError) as caught:
+        repository.mark_ready("v1", owner_id="host-b", chunk_count=1, **_PROVENANCE)
+
+    # 실패 사유가 '상태 때문'인지 '소유자 때문'인지 구분돼야 한다.
+    message = str(caught.value)
+    assert "host-a" in message  # 실제 소유자를 알려준다
+    assert "INDEXING" in message  # 상태는 정상이었다는 것도 함께
