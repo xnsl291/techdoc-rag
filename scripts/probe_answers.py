@@ -40,6 +40,7 @@ from techdoc_rag.adapters.sqlite_document_repository import (  # noqa: E402
 from techdoc_rag.config import load_settings  # noqa: E402
 from techdoc_rag.query.chat_service import PROMPT_VERSION, ChatService  # noqa: E402
 from techdoc_rag.query.context_builder import ContextBuilder  # noqa: E402
+from techdoc_rag.query.query_expander import QueryExpander  # noqa: E402
 from techdoc_rag.query.retriever import Retriever  # noqa: E402
 
 RESULT_DIR = Path(__file__).resolve().parents[1] / "data" / "probes"
@@ -90,6 +91,15 @@ def _build_service() -> tuple[ChatService, dict]:
             repository=repository,
             top_k=settings.retrieval.top_k,
             similarity_threshold=settings.retrieval.similarity_threshold,
+            query_expander=(
+                QueryExpander(
+                    llm_client=llm,
+                    short_query_chars=settings.retrieval.short_query_chars,
+                    max_variants=settings.retrieval.max_query_variants,
+                )
+                if settings.retrieval.expand_short_queries
+                else None
+            ),
         ),
         context_builder=ContextBuilder(budget_chars=settings.retrieval.context_budget_chars),
         llm_client=llm,
