@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -448,3 +450,157 @@ def test_저장된_모든_시각이_같은_형식이다(
     for value in row:
         assert value is not None
         assert pattern.match(value), f"형식 불일치: {value}"
+
+
+def test_스키마_가드가_모든_컬럼을_본다(tmp_path: Path) -> None:
+    """목록을 손으로 관리하면 또 빠진다 — 최근 추가분 4개만 보던 것을
+    스키마 문자열에서 유도하도록 바꿨다(리뷰 이관 #21)."""
+    from techdoc_rag.adapters.sqlite_document_repository import _EXPECTED_COLUMNS
+
+    # 스키마에 실제로 있는 컬럼 수와 같아야 한다. 몇 개만 담고 있으면 안 된다.
+    assert len(_EXPECTED_COLUMNS) > 20
+    assert {"document_id", "status", "created_at", "chunk_count"} <= _EXPECTED_COLUMNS
+
+
+def test_옛_스키마로_만든_DB는_거부한다(tmp_path: Path) -> None:
+    """CREATE TABLE IF NOT EXISTS는 기존 테이블에 컬럼을 더하지 않는다.
+    그대로 붙으면 첫 상태 갱신에서 no such column이 SQL 오류로 나와 원인을 모른다."""
+    database_path = tmp_path / "old.db"
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        """
+        CREATE TABLE documents (
+            document_id TEXT PRIMARY KEY,
+            logical_document_id TEXT NOT NULL,
+            status TEXT NOT NULL
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(MetadataStoreError, match="컬럼이 없음"):
+        SqliteDocumentRepository(database_path).initialize()
+
+
+def test_다른_계열에_같은_해시가_있으면_경고가_남는다(
+    repository: SqliteDocumentRepository, caplog
+) -> None:
+    """이슈 #14의 완료 기준인데 검증되지 않았다. 계열 ID 오타로 같은 파일이
+    두 계열에 들어가면 둘 다 활성이 되어 같은 근거가 두 번 검색된다."""
+    same_hash = "e" * 64
+    repository.register(_document(document_id="v1", sha256=same_hash))
+
+    with caplog.at_level(logging.WARNING):
+        repository.register(
+            _document(document_id="typo", logical_document_id="ls-g100x", sha256=same_hash)
+        )
+
+    assert any("같은 해시가 다른 계열에" in record.message for record in caplog.records)
+    warning = next(r for r in caplog.records if "같은 해시가 다른 계열에" in r.message)
+    assert same_hash[:12] in warning.getMessage()  # 어느 해시인지 알려준다
+
+
+def test_같은_계열_안에서는_경고하지_않는다(
+    repository: SqliteDocumentRepository, caplog
+) -> None:
+    """같은 계열의 중복은 UNIQUE 제약이 막는다 — 경고 대상이 아니다."""
+    repository.register(_document(document_id="v1", sha256="f" * 64))
+
+    with caplog.at_level(logging.WARNING), pytest.raises(MetadataStoreError):
+        repository.register(_document(document_id="v1-again", sha256="f" * 64))
+
+    assert not [r for r in caplog.records if "같은 해시가 다른 계열에" in r.message]
+
+
+def test_소유자가_다르면_메시지에_소유자가_나온다(
+    repository: SqliteDocumentRepository,
+) -> None:
+    """복구가 이미 강등한 문서를 잃은 프로세스가 되살리는 것을 막는 자리다.
+    실패 사유가 '상태 때문'인지 '소유자 때문'인지 구분돼야 한다."""
+    repository.register(_document(document_id="v1"))
+    repository.mark_indexing("v1", owner_id="host-a", lease_seconds=300)
+
+    with pytest.raises(MetadataStoreError) as caught:
+        repository.mark_ready("v1", owner_id="host-b", chunk_count=1, **_PROVENANCE)
+
+    # 실패 사유가 '상태 때문'인지 '소유자 때문'인지 구분돼야 한다.
+    message = str(caught.value)
+    assert "host-a" in message  # 실제 소유자를 알려준다
+    assert "INDEXING" in message  # 상태는 정상이었다는 것도 함께
+
+
+def test_읽기_실패도_MetadataStoreError로_감싸진다(tmp_path: Path) -> None:
+    """커넥션 실패만 감싸고 조회 오류는 sqlite3.Error 그대로 내보내던
+    비대칭이 있었다. 호출자는 저장소 종류를 모르는데 sqlite3 예외를 받았다."""
+    repository = SqliteDocumentRepository(tmp_path / "metadata.db")
+    repository.initialize()
+    # 테이블을 지워 조회 자체가 실패하게 만든다.
+    connection = sqlite3.connect(tmp_path / "metadata.db")
+    connection.execute("DROP TABLE documents")
+    connection.commit()
+    connection.close()
+
+    for call in (
+        lambda: repository.get("v1"),
+        lambda: repository.find_by_sha256("manual-g100", "a" * 64),
+        lambda: repository.find_sha256_across_series("a" * 64),
+        lambda: repository.active_document_ids(),
+    ):
+        with pytest.raises(MetadataStoreError, match="조회 실패"):
+            call()
+
+
+def test_naive_datetime은_저장소_예외로_거부된다(
+    repository: SqliteDocumentRepository,
+) -> None:
+    """raw ValueError를 던지면 저장소 오류를 잡는 쪽이 못 받는다."""
+    naive = _document(document_id="v1")
+    naive = replace(naive, created_at=datetime(2026, 9, 4, 12, 0, 0))  # tzinfo 없음
+
+    with pytest.raises(MetadataStoreError, match="aware"):
+        repository.register(naive)
+
+
+def test_lease_until도_같은_시각_형식이다(
+    repository: SqliteDocumentRepository, tmp_path: Path
+) -> None:
+    """`_to_iso`의 존재 근거가 바로 이 컬럼의 사전순 비교인데, 정작 형식
+    검증에서 빠져 있었다(리뷰 이관 #21). mark_ready 이후에는 NULL이 되므로
+    mark_indexing 직후에 봐야 한다."""
+    import re
+
+    repository.register(_document(document_id="doc-1"))
+    repository.mark_indexing("doc-1", owner_id="host-1", lease_seconds=300)
+
+    pattern = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+00:00$")
+    raw_connection = sqlite3.connect(tmp_path / "metadata.db")
+    row = raw_connection.execute(
+        "SELECT lease_until FROM documents WHERE document_id = 'doc-1'"
+    ).fetchone()
+    raw_connection.close()
+
+    assert row[0] is not None
+    assert pattern.match(row[0]), f"형식 불일치: {row[0]}"
+
+
+def test_리스_만료_비교가_같은_초에서도_뒤집히지_않는다(
+    repository: SqliteDocumentRepository, tmp_path: Path
+) -> None:
+    """마이크로초가 있는 값과 없는 값이 섞이면 `.`(0x2E) > `+`(0x2B)라
+    같은 초에서 순서가 뒤집힌다 — 그게 형식을 고정한 이유다.
+    옛 형식(마이크로초 없음)을 직접 넣어 비교가 어떻게 되는지 고정해 둔다."""
+    repository.register(_document(document_id="doc-1"))
+    repository.mark_indexing("doc-1", owner_id="host-1", lease_seconds=300)
+
+    raw_connection = sqlite3.connect(tmp_path / "metadata.db")
+    stored = raw_connection.execute(
+        "SELECT lease_until FROM documents WHERE document_id = 'doc-1'"
+    ).fetchone()[0]
+    raw_connection.close()
+
+    same_second_without_micros = stored[:19] + "+00:00"
+    # 사전순으로는 마이크로초 있는 쪽이 항상 크다. 두 형식이 섞이면
+    # "아직 안 만료됐는데 만료로 보이는" 판정이 나온다.
+    assert same_second_without_micros < stored
+    assert len(stored) == len("2026-09-04T00:00:00.000000+00:00")

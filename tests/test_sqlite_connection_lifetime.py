@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -149,3 +150,54 @@ def test_없는_경로의_부모는_만들고_잠긴_DB는_MetadataStoreError(
     (tmp_path / "dir_as_db").mkdir(exist_ok=True)
     with pytest.raises(MetadataStoreError):
         broken.initialize()
+
+
+def test_같은_계열에_active가_둘이_되는_것을_DB가_막는다(
+    repository: SqliteDocumentRepository, tmp_path: Path
+) -> None:
+    """"계열당 active 1개" 불변식은 코드가 아니라 저장소가 강제해야 한다(05 CR-03).
+
+    코드로만 지키면 버그 하나에 뚫리고, 그때 같은 근거가 두 번 검색되는데
+    오류가 나지 않아 알아채지 못한다. partial unique index를 직접 때려서
+    확인한다 — 저장소 API를 우회해야 이 장치만 검증할 수 있다.
+    """
+    for version, document_id in ((1, "v1"), (2, "v2")):
+        repository.register(_document(document_id, "manual-g100", version=version))
+        repository.mark_indexing(document_id, owner_id="host", lease_seconds=300)
+        repository.mark_ready(document_id, owner_id="host", chunk_count=1, **_PROVENANCE)
+    repository.activate("v1")
+
+    raw = sqlite3.connect(tmp_path / "metadata.db")
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            raw.execute("UPDATE documents SET is_active = 1 WHERE document_id = 'v2'")
+            raw.commit()
+    finally:
+        raw.close()
+
+    assert repository.active_document_ids() == ["v1"]
+
+
+def test_전환이_실패하면_기존_active가_그대로_유지된다(
+    repository: SqliteDocumentRepository,
+) -> None:
+    """01 §17.6: 실패 시 기존 서비스 검색 상태를 유지한다.
+
+    지키는 장치는 롤백이 아니라 **검사 순서**다. 상태 확인이 구버전
+    비활성화보다 먼저 일어나야 한다 — 순서가 뒤집히면 거부된 전환이
+    "아무것도 활성이 아닌" 상태를 남기고, 검색이 통째로 비는데 오류는 안 난다.
+    (롤백 자체는 이 경로로 도달하지 않는다. 검사가 먼저라 되돌릴 것이 없다.)
+    """
+    repository.register(_document("v1", "manual-g100", version=1))
+    repository.mark_indexing("v1", owner_id="host", lease_seconds=300)
+    repository.mark_ready("v1", owner_id="host", chunk_count=1, **_PROVENANCE)
+    repository.activate("v1")
+
+    # v2는 READY가 아니다(등록만 됨) — 전환이 거부돼야 한다.
+    repository.register(_document("v2", "manual-g100", version=2))
+    with pytest.raises(MetadataStoreError, match="READY가 아님"):
+        repository.activate("v2")
+
+    assert repository.active_document_ids() == ["v1"]
+    v1 = repository.get("v1")
+    assert v1 is not None and v1.is_active
