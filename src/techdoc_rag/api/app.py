@@ -19,7 +19,8 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException
 
-from techdoc_rag.api.schemas import ChatRequest, ChatResponse, HealthResponse
+from techdoc_rag.agent.agent_service import AgentService
+from techdoc_rag.api.schemas import AgentResponse, ChatRequest, ChatResponse, HealthResponse
 from techdoc_rag.domain.errors import (
     GenerationError,
     MetadataStoreError,
@@ -33,20 +34,24 @@ HealthProbes = dict[str, Callable[[], None]]
 
 def create_app(
     chat_service: ChatService,
+    agent_service: AgentService,
     health_probes: HealthProbes,
     max_question_chars: int,
 ) -> FastAPI:
     app = FastAPI(title="techdoc-rag", docs_url=None, redoc_url=None)
 
-    @app.post("/chat", response_model=ChatResponse)
-    def chat(request: ChatRequest) -> ChatResponse:
-        if len(request.question) > max_question_chars:
-            # 길이 상한은 프롬프트 예산 보호다. 긴 질문을 조용히 자르면
-            # 모델이 받은 질문과 사용자가 보낸 질문이 달라진다.
+    def check_length(question: str) -> None:
+        """길이 상한은 프롬프트 예산 보호다. 긴 질문을 조용히 자르면
+        모델이 받은 질문과 사용자가 보낸 질문이 달라진다."""
+        if len(question) > max_question_chars:
             raise HTTPException(
                 status_code=422,
-                detail=f"질문이 너무 김: {len(request.question)}자 (상한 {max_question_chars}자)",
+                detail=f"질문이 너무 김: {len(question)}자 (상한 {max_question_chars}자)",
             )
+
+    @app.post("/chat", response_model=ChatResponse)
+    def chat(request: ChatRequest) -> ChatResponse:
+        check_length(request.question)
         try:
             answer = chat_service.ask(request.question)
         except (RetrievalError, GenerationError, MetadataStoreError) as error:
@@ -55,6 +60,23 @@ def create_app(
             # 활성 목록·문서명 조회(SQLite)의 장애다(리뷰 #28 B2).
             raise HTTPException(status_code=503, detail=str(error)) from error
         return ChatResponse.from_answer(answer)
+
+    @app.post("/agent", response_model=AgentResponse)
+    def agent(request: ChatRequest) -> AgentResponse:
+        """도구를 골라 여러 번 부르는 경로 (#42).
+
+        /chat과 나눠 둔다. 응답에 담는 것이 다르고(도구 호출 기록 대 인용),
+        외부에서 /chat 계약에 기대는 곳이 있다(#43).
+
+        여기서도 장애는 503이다. 에이전트가 도구 오용은 결과로 알려 주고
+        넘어가지만, 검색 저장소에 못 붙는 것은 그대로 올라온다(D-005).
+        """
+        check_length(request.question)
+        try:
+            answer = agent_service.ask(request.question)
+        except (RetrievalError, GenerationError, MetadataStoreError) as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return AgentResponse.from_answer(answer)
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
@@ -88,6 +110,7 @@ def create_default_app() -> FastAPI:
     from techdoc_rag.adapters.ollama_llm_client import OllamaLlmClient
     from techdoc_rag.adapters.qdrant_vector_store import QdrantVectorStore
     from techdoc_rag.adapters.sqlite_document_repository import SqliteDocumentRepository
+    from techdoc_rag.agent.tools import ToolBox
     from techdoc_rag.config import load_settings
     from techdoc_rag.query.context_builder import ContextBuilder
     from techdoc_rag.query.query_expander import QueryExpander
@@ -121,27 +144,36 @@ def create_default_app() -> FastAPI:
         queue_timeout_seconds=settings.llm.queue_timeout_seconds,
         generation_timeout_seconds=settings.llm.generation_timeout_seconds,
     )
-    chat_service = ChatService(
-        retriever=Retriever(
-            embedding_model=embedding,
-            vector_store=vector_store,
-            repository=repository,
-            top_k=settings.retrieval.top_k,
-            similarity_threshold=settings.retrieval.similarity_threshold,
-            query_expander=(
-                QueryExpander(
-                    llm_client=llm,
-                    short_query_chars=settings.retrieval.short_query_chars,
-                    max_variants=settings.retrieval.max_query_variants,
-                )
-                if settings.retrieval.expand_short_queries
-                else None
-            ),
-            expand_to_neighbors=settings.retrieval.expand_evidence_to_neighbors,
+    # 두 경로가 같은 Retriever를 쓴다. 따로 만들면 top_k·문턱값이 갈려서
+    # 같은 질문에 /chat과 /agent의 근거가 달라진다.
+    retriever = Retriever(
+        embedding_model=embedding,
+        vector_store=vector_store,
+        repository=repository,
+        top_k=settings.retrieval.top_k,
+        similarity_threshold=settings.retrieval.similarity_threshold,
+        query_expander=(
+            QueryExpander(
+                llm_client=llm,
+                short_query_chars=settings.retrieval.short_query_chars,
+                max_variants=settings.retrieval.max_query_variants,
+            )
+            if settings.retrieval.expand_short_queries
+            else None
         ),
+        expand_to_neighbors=settings.retrieval.expand_evidence_to_neighbors,
+    )
+    chat_service = ChatService(
+        retriever=retriever,
         context_builder=ContextBuilder(budget_chars=settings.retrieval.context_budget_chars),
         llm_client=llm,
         repository=repository,
+        max_answer_tokens=settings.llm.generation_max_tokens,
+    )
+    agent_service = AgentService(
+        llm_client=llm,
+        toolbox=ToolBox(retriever=retriever, repository=repository),
+        max_steps=settings.agent.max_steps,
         max_answer_tokens=settings.llm.generation_max_tokens,
     )
     health_probes: HealthProbes = {
@@ -149,7 +181,9 @@ def create_default_app() -> FastAPI:
         "qdrant": lambda: vector_store.count(),
         "ollama": lambda: _probe_ollama(settings.llm.endpoint),
     }
-    return create_app(chat_service, health_probes, settings.api.max_question_chars)
+    return create_app(
+        chat_service, agent_service, health_probes, settings.api.max_question_chars
+    )
 
 
 def _probe_ollama(endpoint: str) -> None:
