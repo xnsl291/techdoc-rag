@@ -103,7 +103,7 @@ if question:
         with st.spinner("근거를 찾고 답을 만드는 중..."):
             try:
                 display: DisplayAnswer | str = to_display(
-                    ask_api(API_BASE_URL, question, REQUEST_TIMEOUT_SECONDS)
+                    ask_api(API_BASE_URL, "chat", question, REQUEST_TIMEOUT_SECONDS)
                 )
             except ApiError as error:
                 display = str(error)
