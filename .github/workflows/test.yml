@@ -1,0 +1,36 @@
+# PR과 main 푸시마다 테스트·린트를 돌린다.
+#
+# 이 저장소의 테스트는 Ollama와 Qdrant 실물을 요구하지 않는다. 외부 서비스는
+# 테스트 안에서 띄우는 가짜 HTTP 서버로 대신하고(tests/test_ollama_*.py),
+# Qdrant는 로컬 모드(:memory:)를 쓴다. 그래서 러너에 서비스 컨테이너를
+# 붙이지 않아도 전체 테스트가 돈다.
+
+name: test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # pyproject.toml이 선언한 하한(>=3.12)으로 돌린다. 개발은 3.13에서 하므로
+      # 여기서 3.12를 돌려야 하한 선언이 실제로 지켜지는지 확인된다.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -e ".[dev]"
+
+      # ruff format은 돌리지 않는다. 현재 코드가 포맷터 결과와 다르고,
+      # 포맷 통일은 이 저장소에서 합의한 적이 없다.
+      - run: ruff check .
+
+      - run: pytest
