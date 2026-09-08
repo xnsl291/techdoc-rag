@@ -246,3 +246,81 @@ def test_확장기가_없으면_원문만_검색한다() -> None:
     retriever.retrieve("정격출력")
 
     assert embedding.queries == ["정격출력"]
+
+
+class NeighborStore(PerQueryStore):
+    """이웃 조회까지 흉내 내는 저장소."""
+
+    def __init__(self, by_vector, neighbors) -> None:
+        super().__init__(by_vector)
+        self._neighbors = neighbors
+        self.neighbor_calls: list[tuple[str, int, int]] = []
+
+    def fetch_overlapping(self, document_id, page_start, page_end):
+        self.neighbor_calls.append((document_id, page_start, page_end))
+        return self._neighbors
+
+
+def _plain_chunk(chunk_id: str) -> Chunk:
+    return Chunk(
+        chunk_id=chunk_id,
+        document_id="ls-m100-v1",
+        document_version=1,
+        page_start=245,
+        page_end=248,
+        text=f"{chunk_id} 본문",
+    )
+
+
+def test_이웃_청크를_근거에_함께_넣는다() -> None:
+    """검색이 잘린 표의 한쪽만 물어 와도 나머지 쪽이 근거에 들어와야 한다."""
+    store = NeighborStore({2.0: [_retrieved("b", 0.9)]}, [_plain_chunk("a"), _plain_chunk("b")])
+    retriever = Retriever(
+        embedding_model=RecordingEmbedding(),
+        vector_store=store,
+        repository=FakeRepository(["ls-m100-v1"]),
+        top_k=5,
+        similarity_threshold=0.0,
+        expand_to_neighbors=True,
+    )
+
+    result = retriever.retrieve("질문")
+
+    ids = [r.chunk.chunk_id for r in result.chunks]
+    assert ids == ["b", "a"]  # 검색으로 걸린 것이 앞, 이웃이 뒤
+    # 조회 범위는 검색으로 걸린 청크의 페이지 범위다
+    assert store.neighbor_calls == [("ls-m100-v1", 10, 11)]
+
+
+def test_이웃은_검색된_청크보다_점수가_낮다() -> None:
+    """예산이 모자랄 때 이웃부터 빠져야 한다. 검색으로 걸린 근거가 우선이다."""
+    store = NeighborStore({2.0: [_retrieved("b", 0.9)]}, [_plain_chunk("a"), _plain_chunk("b")])
+    retriever = Retriever(
+        embedding_model=RecordingEmbedding(),
+        vector_store=store,
+        repository=FakeRepository(["ls-m100-v1"]),
+        top_k=5,
+        similarity_threshold=0.0,
+        expand_to_neighbors=True,
+    )
+
+    result = retriever.retrieve("질문")
+
+    assert result.chunks[0].score > result.chunks[1].score
+    assert result.chunks[0].chunk.chunk_id == "b"  # 원래 걸린 것의 점수는 그대로
+
+
+def test_확장을_끄면_이웃을_조회하지_않는다() -> None:
+    store = NeighborStore({2.0: [_retrieved("b", 0.9)]}, [_plain_chunk("a")])
+    retriever = Retriever(
+        embedding_model=RecordingEmbedding(),
+        vector_store=store,
+        repository=FakeRepository(["ls-m100-v1"]),
+        top_k=5,
+        similarity_threshold=0.0,
+    )
+
+    result = retriever.retrieve("질문")
+
+    assert store.neighbor_calls == []
+    assert [r.chunk.chunk_id for r in result.chunks] == ["b"]
