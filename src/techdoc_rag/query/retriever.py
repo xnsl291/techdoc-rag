@@ -5,6 +5,9 @@ similarity_threshold 미만인 것을 버린다. threshold 0.0은 사실상 "거
 — 코사인 점수는 이론상 음수가 가능해 0.0도 필터이긴 하나, 실물 텍스트에서
 음수 유사도는 드물다 [추정]. 값 자체가 [미확정, 시작점]이며 평가셋 실험으로 정한다.
 
+질의 확장이 붙으면 표현 여러 개로 검색해 결과를 합친다(#32). 합칠 때는
+같은 청크의 가장 높은 점수를 남기고, 상위 top_k만 넘긴다.
+
 활성 목록 조회(SQLite)와 벡터 검색(Qdrant) 사이에 버전이 전환되면 구버전
 근거가 쓰일 수 있는 창이 있다. 단일 운영자·로컬 환경이라 전환과 질의가 겹칠
 확률이 낮아 지금은 기록만 하고 완화하지 않는다(02 DP-55). FastAPI로 다중
@@ -18,6 +21,7 @@ from dataclasses import dataclass
 from techdoc_rag.domain.chunk import RetrievedChunk
 from techdoc_rag.domain.errors import IndexingError, RetrievalError
 from techdoc_rag.domain.ports import DocumentRepository, EmbeddingModel, VectorStore
+from techdoc_rag.query.query_expander import QueryExpander
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,12 +45,16 @@ class Retriever:
         repository: DocumentRepository,
         top_k: int,
         similarity_threshold: float,
+        query_expander: QueryExpander | None = None,
     ) -> None:
         self._embedding_model = embedding_model
         self._vector_store = vector_store
         self._repository = repository
         self._top_k = top_k
         self._similarity_threshold = similarity_threshold
+        # 없으면 원문 한 번만 검색한다. 확장은 검색 전략이므로 여기에 둔다 —
+        # 상위 계층은 "질문에 맞는 근거를 달라"고만 하고 방법은 모른다.
+        self._query_expander = query_expander
 
     def retrieve(self, question: str) -> RetrievalResult:
         """질문과 관련된 청크를 점수 내림차순으로 돌려준다.
@@ -59,17 +67,33 @@ class Retriever:
         if not active_ids:
             # 검색 대상이 없으면 질문 임베딩(수십 ms의 Ollama 호출)도 아낀다.
             return RetrievalResult(chunks=[], dropped_below_threshold=0)
-        try:
-            query_vector = self._embedding_model.embed_query(question)
-        except IndexingError as error:
-            # 임베딩 어댑터는 색인 경로용이라 IndexingError를 던지지만, 질의
-            # 임베딩 실패는 검색 실패다. 그대로 흘리면 HTTP 계층의 오류 매핑
-            # (Retrieval/Generation→503)에 안 걸려 500이 난다 — 실물 검증에서 발견.
-            raise RetrievalError(f"질문 임베딩 실패: {error}") from error
-        results = self._vector_store.search(
-            query_vector, top_k=self._top_k, active_document_ids=active_ids
+
+        queries = (
+            self._query_expander.expand(question) if self._query_expander else [question]
         )
-        kept = [result for result in results if result.score >= self._similarity_threshold]
-        return RetrievalResult(
-            chunks=kept, dropped_below_threshold=len(results) - len(kept)
-        )
+        best: dict[str, RetrievedChunk] = {}
+        dropped = 0
+        for query in queries:
+            try:
+                query_vector = self._embedding_model.embed_query(query)
+            except IndexingError as error:
+                # 임베딩 어댑터는 색인 경로용이라 IndexingError를 던지지만, 질의
+                # 임베딩 실패는 검색 실패다. 그대로 흘리면 HTTP 계층의 오류 매핑
+                # (Retrieval/Generation→503)에 안 걸려 500이 난다 — 실물에서 발견.
+                raise RetrievalError(f"질문 임베딩 실패: {error}") from error
+            results = self._vector_store.search(
+                query_vector, top_k=self._top_k, active_document_ids=active_ids
+            )
+            for result in results:
+                if result.score < self._similarity_threshold:
+                    dropped += 1
+                    continue
+                # 같은 청크가 여러 표현에서 나오면 가장 높은 점수를 남긴다.
+                # 표현마다 점수가 다르므로 나중 것으로 덮으면 순서가 흔들린다.
+                previous = best.get(result.chunk.chunk_id)
+                if previous is None or result.score > previous.score:
+                    best[result.chunk.chunk_id] = result
+
+        # 표현을 늘린 만큼 후보도 늘어난다. 상위 top_k만 남겨 프롬프트 예산을 지킨다.
+        chunks = sorted(best.values(), key=lambda item: item.score, reverse=True)[: self._top_k]
+        return RetrievalResult(chunks=chunks, dropped_below_threshold=dropped)

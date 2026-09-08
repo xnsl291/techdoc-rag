@@ -57,6 +57,9 @@ class RetrievalSettings:
     top_k: int
     similarity_threshold: float
     context_budget_chars: int
+    expand_short_queries: bool
+    short_query_chars: int
+    max_query_variants: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +163,13 @@ def load_settings(settings_path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
             ),
             context_budget_chars=int(
                 _require(retrieval_section, "context_budget_chars", "retrieval")
+            ),
+            expand_short_queries=bool(
+                _require(retrieval_section, "expand_short_queries", "retrieval")
+            ),
+            short_query_chars=int(_require(retrieval_section, "short_query_chars", "retrieval")),
+            max_query_variants=int(
+                _require(retrieval_section, "max_query_variants", "retrieval")
             ),
         ),
         api=ApiSettings(

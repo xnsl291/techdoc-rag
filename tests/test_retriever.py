@@ -135,3 +135,114 @@ def test_질문_임베딩_실패는_RetrievalError로_변환된다() -> None:
 
     with pytest.raises(RetrievalError, match="질문 임베딩 실패"):
         retriever.retrieve("질문")
+
+
+class FakeExpander:
+    def __init__(self, variants: list[str]) -> None:
+        self._variants = variants
+        self.calls: list[str] = []
+
+    def expand(self, question: str) -> list[str]:
+        self.calls.append(question)
+        return self._variants
+
+
+class RecordingEmbedding:
+    """표현마다 다른 벡터를 만들어, 어떤 표현으로 검색했는지 추적한다."""
+
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    def embed_query(self, text: str) -> list[float]:
+        self.queries.append(text)
+        return [float(len(text)), 0.0]
+
+
+class PerQueryStore:
+    """표현별로 다른 결과를 돌려주는 가짜 저장소."""
+
+    def __init__(self, by_vector: dict[float, list[RetrievedChunk]]) -> None:
+        self._by_vector = by_vector
+
+    def search(self, query_vector, top_k, active_document_ids):
+        return self._by_vector.get(query_vector[0], [])
+
+
+def test_확장된_표현마다_검색하고_결과를_합친다() -> None:
+    embedding = RecordingEmbedding()
+    # 길이로 표현을 구분한다: "정격출력"(4) / "정격 출력 사양"(8)
+    store = PerQueryStore(
+        {4.0: [_retrieved("a", 0.7)], 8.0: [_retrieved("b", 0.6)]}
+    )
+    retriever = Retriever(
+        embedding_model=embedding,
+        vector_store=store,
+        repository=FakeRepository(["ls-m100-v1"]),
+        top_k=5,
+        similarity_threshold=0.0,
+        query_expander=FakeExpander(["정격출력", "정격 출력 사양"]),
+    )
+
+    result = retriever.retrieve("정격출력")
+
+    assert embedding.queries == ["정격출력", "정격 출력 사양"]
+    assert [r.chunk.chunk_id for r in result.chunks] == ["a", "b"]  # 점수 내림차순
+
+
+def test_같은_청크는_가장_높은_점수로_남는다() -> None:
+    """표현마다 점수가 다르다. 나중 것으로 덮으면 순서가 흔들린다.
+
+    높은 점수를 **먼저** 오게 둔다. 낮은 점수를 먼저 두면 나중 것으로 덮는
+    구현에서도 우연히 통과해 검증력이 없다(커밋 전 변형 확인에서 발견).
+    """
+    store = PerQueryStore({4.0: [_retrieved("a", 0.9)], 8.0: [_retrieved("a", 0.4)]})
+    retriever = Retriever(
+        embedding_model=RecordingEmbedding(),
+        vector_store=store,
+        repository=FakeRepository(["ls-m100-v1"]),
+        top_k=5,
+        similarity_threshold=0.0,
+        query_expander=FakeExpander(["정격출력", "정격 출력 사양"]),
+    )
+
+    result = retriever.retrieve("정격출력")
+
+    assert len(result.chunks) == 1
+    assert result.chunks[0].score == 0.9
+
+
+def test_합친_뒤에도_top_k를_넘지_않는다() -> None:
+    """표현을 늘린 만큼 후보도 늘어난다. 그대로 넘기면 프롬프트 예산을 넘는다."""
+    store = PerQueryStore(
+        {
+            4.0: [_retrieved("a", 0.9), _retrieved("b", 0.8)],
+            8.0: [_retrieved("c", 0.7), _retrieved("d", 0.6)],
+        }
+    )
+    retriever = Retriever(
+        embedding_model=RecordingEmbedding(),
+        vector_store=store,
+        repository=FakeRepository(["ls-m100-v1"]),
+        top_k=3,
+        similarity_threshold=0.0,
+        query_expander=FakeExpander(["정격출력", "정격 출력 사양"]),
+    )
+
+    result = retriever.retrieve("정격출력")
+
+    assert [r.chunk.chunk_id for r in result.chunks] == ["a", "b", "c"]
+
+
+def test_확장기가_없으면_원문만_검색한다() -> None:
+    embedding = RecordingEmbedding()
+    retriever = Retriever(
+        embedding_model=embedding,
+        vector_store=PerQueryStore({4.0: [_retrieved("a", 0.9)]}),
+        repository=FakeRepository(["ls-m100-v1"]),
+        top_k=5,
+        similarity_threshold=0.0,
+    )
+
+    retriever.retrieve("정격출력")
+
+    assert embedding.queries == ["정격출력"]
