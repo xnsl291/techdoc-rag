@@ -60,6 +60,7 @@ class RetrievalSettings:
     expand_short_queries: bool
     short_query_chars: int
     max_query_variants: int
+    expand_evidence_to_neighbors: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +171,9 @@ def load_settings(settings_path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
             short_query_chars=int(_require(retrieval_section, "short_query_chars", "retrieval")),
             max_query_variants=int(
                 _require(retrieval_section, "max_query_variants", "retrieval")
+            ),
+            expand_evidence_to_neighbors=bool(
+                _require(retrieval_section, "expand_evidence_to_neighbors", "retrieval")
             ),
         ),
         api=ApiSettings(

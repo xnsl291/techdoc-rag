@@ -67,6 +67,11 @@ retrieval:
   expand_short_queries: false
   short_query_chars: 20
   max_query_variants: 3             # 원문 포함
+  # 찾은 청크와 페이지가 겹치는 이웃을 근거에 함께 넣음(#35).
+  # 표가 청크 경계에서 잘리면 항목명과 값이 다른 조각에 남는데, 검색은 둘 중
+  # 하나만 물어 옴. 2026-09-08 실측: 정격표가 두 청크로 갈렸고 검색이 값 없는
+  # 쪽을 골라 "확인할 수 없습니다"가 나왔음. 이웃을 넣으면 답이 나옴.
+  expand_evidence_to_neighbors: true
 
 api:
   # [미확정, 시작점] 질문 길이 상한. 프롬프트 예산 보호용이며 평가셋의 실제
