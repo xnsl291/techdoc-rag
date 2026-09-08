@@ -100,6 +100,7 @@ def _build_service() -> tuple[ChatService, dict]:
                 if settings.retrieval.expand_short_queries
                 else None
             ),
+            expand_to_neighbors=settings.retrieval.expand_evidence_to_neighbors,
         ),
         context_builder=ContextBuilder(budget_chars=settings.retrieval.context_budget_chars),
         llm_client=llm,

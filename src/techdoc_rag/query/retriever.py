@@ -23,6 +23,10 @@ from techdoc_rag.domain.errors import IndexingError, RetrievalError
 from techdoc_rag.domain.ports import DocumentRepository, EmbeddingModel, VectorStore
 from techdoc_rag.query.query_expander import QueryExpander
 
+# 이웃 청크에 물려줄 점수 비율. 원래 걸린 청크보다 확실히 낮되, 다른 질의에서
+# 걸린 청크들 사이의 순서는 흔들지 않을 만큼만 낮춘다.
+_NEIGHBOR_SCORE_RATIO = 0.99
+
 
 @dataclass(frozen=True, slots=True)
 class RetrievalResult:
@@ -46,6 +50,7 @@ class Retriever:
         top_k: int,
         similarity_threshold: float,
         query_expander: QueryExpander | None = None,
+        expand_to_neighbors: bool = False,
     ) -> None:
         self._embedding_model = embedding_model
         self._vector_store = vector_store
@@ -55,6 +60,7 @@ class Retriever:
         # 없으면 원문 한 번만 검색한다. 확장은 검색 전략이므로 여기에 둔다 —
         # 상위 계층은 "질문에 맞는 근거를 달라"고만 하고 방법은 모른다.
         self._query_expander = query_expander
+        self._expand_to_neighbors = expand_to_neighbors
 
     def retrieve(self, question: str) -> RetrievalResult:
         """질문과 관련된 청크를 점수 내림차순으로 돌려준다.
@@ -96,4 +102,29 @@ class Retriever:
 
         # 표현을 늘린 만큼 후보도 늘어난다. 상위 top_k만 남겨 프롬프트 예산을 지킨다.
         chunks = sorted(best.values(), key=lambda item: item.score, reverse=True)[: self._top_k]
+        if self._expand_to_neighbors:
+            chunks = self._with_neighbors(chunks)
         return RetrievalResult(chunks=chunks, dropped_below_threshold=dropped)
+
+    def _with_neighbors(self, found: list[RetrievedChunk]) -> list[RetrievedChunk]:
+        """찾은 청크와 페이지가 겹치는 이웃을 함께 넣는다.
+
+        표가 청크 경계에서 잘리면 항목명과 값이 다른 조각에 남고, 검색은 둘 중
+        하나만 물어 온다. 2026-09-08 실측에서 정격표가 0177/0178로 갈렸고 검색이
+        값 없는 0178을 골라 "확인할 수 없습니다"가 나왔다.
+
+        이웃은 검색으로 뽑힌 것이 아니므로 점수를 물려받되 조금 낮춘다. 원래
+        걸린 청크가 먼저 오고 이웃이 뒤따라야, 예산이 모자랄 때 이웃부터 빠진다.
+        """
+        collected = {item.chunk.chunk_id: item for item in found}
+        for item in found:
+            chunk = item.chunk
+            for neighbor in self._vector_store.fetch_overlapping(
+                chunk.document_id, chunk.page_start, chunk.page_end
+            ):
+                if neighbor.chunk_id in collected:
+                    continue
+                collected[neighbor.chunk_id] = RetrievedChunk(
+                    chunk=neighbor, score=item.score * _NEIGHBOR_SCORE_RATIO
+                )
+        return sorted(collected.values(), key=lambda item: item.score, reverse=True)

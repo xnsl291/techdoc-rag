@@ -56,6 +56,11 @@ _FILTERED_PAYLOAD_FIELDS = (
 # 전량을 한 요청에 담으면 수십 MB가 된다. 서버에는 요청 크기 제한이 있어 거부한다.
 UPSERT_BATCH_SIZE = 128
 
+# 이웃 조회에서 한 번에 가져올 상한. 한 페이지 범위에 걸친 청크가 이보다 많을
+# 일은 없다(청크 1,200자, 페이지당 2,000자 안팎). 넘으면 조용히 잘리는 대신
+# 값을 키운다.
+NEIGHBOR_SCROLL_LIMIT = 64
+
 
 class QdrantVectorStore:
     """VectorStore Protocol 구현."""
@@ -238,6 +243,39 @@ class QdrantVectorStore:
         except Exception as error:
             raise IndexingError(f"문서 벡터 삭제 실패: {error}") from error
 
+    def fetch_overlapping(
+        self, document_id: str, page_start: int, page_end: int
+    ) -> list[Chunk]:
+        """주어진 페이지 범위와 겹치는 청크를 chunk_id 순으로 돌려준다.
+
+        "겹친다"는 (청크 끝 >= 요청 시작) 그리고 (청크 시작 <= 요청 끝)이다.
+        표가 청크 경계에서 잘렸을 때 항목명과 값이 서로 다른 조각에 남는데,
+        페이지가 겹치므로 이 조건으로 다시 모을 수 있다.
+        """
+        try:
+            points, _ = self._client.scroll(
+                collection_name=self._collection_name,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="document_id", match=models.MatchValue(value=document_id)
+                        ),
+                        models.FieldCondition(
+                            key="page_end", range=models.Range(gte=page_start)
+                        ),
+                        models.FieldCondition(
+                            key="page_start", range=models.Range(lte=page_end)
+                        ),
+                    ]
+                ),
+                limit=NEIGHBOR_SCROLL_LIMIT,
+                with_payload=True,
+            )
+        except Exception as error:
+            raise RetrievalError(f"이웃 청크 조회 실패: {error}") from error
+        chunks = [self._to_chunk(point.payload) for point in points]
+        return sorted(chunks, key=lambda chunk: chunk.chunk_id)
+
     def delete_stale_runs(self, document_id: str, current_index_run_id: str) -> None:
         """같은 문서에서 이번 실행이 아닌 벡터를 지운다(05 CR-01).
 
@@ -283,8 +321,13 @@ class QdrantVectorStore:
 
     @staticmethod
     def _to_retrieved_chunk(point: models.ScoredPoint) -> RetrievedChunk:
-        payload = point.payload or {}
-        chunk = Chunk(
+        return RetrievedChunk(
+            chunk=QdrantVectorStore._to_chunk(point.payload or {}), score=point.score
+        )
+
+    @staticmethod
+    def _to_chunk(payload: dict) -> Chunk:
+        return Chunk(
             chunk_id=payload["chunk_id"],
             document_id=payload["document_id"],
             document_version=payload["document_version"],
@@ -293,4 +336,3 @@ class QdrantVectorStore:
             text=payload["text"],
             section=payload.get("section"),
         )
-        return RetrievedChunk(chunk=chunk, score=point.score)
