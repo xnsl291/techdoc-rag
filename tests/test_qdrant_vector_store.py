@@ -381,3 +381,77 @@ def test_고아_벡터_정리는_이번_실행이_아닌_것만_지운다(store:
     assert [result.chunk.chunk_id for result in remaining] == ["doc-a:0000"]
     other = store.search([1.0, 0.0, 0.0, 0.0], top_k=10, active_document_ids=["doc-b"])
     assert len(other) == 1  # 다른 문서는 무사
+
+
+def test_페이지가_겹치는_이웃_청크를_가져온다(store: QdrantVectorStore) -> None:
+    """표가 청크 경계에서 잘리면 항목명과 값이 다른 조각에 남고, 검색은 둘 중
+    하나만 물어 온다(2026-09-08 실측). 겹치는 이웃을 다시 모아 잇는다."""
+    run = _index_run()
+    chunks = [
+        _chunk("doc-a:0000", page_start=245),
+        _chunk("doc-a:0001", page_start=248),
+        _chunk("doc-a:0002", page_start=251),
+    ]
+    store.upsert(chunks, [_vector(0.1), _vector(0.2), _vector(0.3)], run)
+    store.upsert(
+        [_chunk("doc-b:0000", document_id="doc-b", page_start=248)],
+        [_vector(0.4)],
+        IndexRun(
+            document_id="doc-b",
+            logical_document_id="ls-s100",
+            document_type="manual",
+            index_run_id="run-b",
+        ),
+    )
+
+    found = store.fetch_overlapping("doc-a", page_start=248, page_end=248)
+
+    assert [c.chunk_id for c in found] == ["doc-a:0001"]  # 다른 문서는 안 섞임
+
+
+def test_이웃_조회는_범위가_걸치기만_해도_잡는다(store: QdrantVectorStore) -> None:
+    run = _index_run()
+    # p.245~248 청크와 p.248~250 청크는 248에서 겹친다 — 잘린 표의 양쪽이다
+    left = Chunk(
+        chunk_id="doc-a:0177",
+        document_id="doc-a",
+        document_version=1,
+        page_start=245,
+        page_end=248,
+        text="kW 0.1 0.2 0.4 정격 출력",
+    )
+    right = Chunk(
+        chunk_id="doc-a:0178",
+        document_id="doc-a",
+        document_version=1,
+        page_start=248,
+        page_end=250,
+        text="정격 전류(A) 1.0 1.8 3.7",
+    )
+    # 요청 범위 안에서 시작하는 청크. "청크 시작 <= 요청 끝" 조건이 있어야 잡힌다
+    inside = Chunk(
+        chunk_id="doc-a:0179",
+        document_id="doc-a",
+        document_version=1,
+        page_start=250,
+        page_end=253,
+        text="12.2 제품 상세 사양",
+    )
+    # 범위 밖. 이것까지 잡히면 근거가 무한정 늘어난다
+    outside = Chunk(
+        chunk_id="doc-a:0180",
+        document_id="doc-a",
+        document_version=1,
+        page_start=254,
+        page_end=256,
+        text="12.4 주변 기기",
+    )
+    store.upsert(
+        [left, right, inside, outside],
+        [_vector(0.1), _vector(0.2), _vector(0.3), _vector(0.4)],
+        run,
+    )
+
+    found = store.fetch_overlapping("doc-a", page_start=248, page_end=250)
+
+    assert [c.chunk_id for c in found] == ["doc-a:0177", "doc-a:0178", "doc-a:0179"]
