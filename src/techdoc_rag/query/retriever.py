@@ -62,14 +62,24 @@ class Retriever:
         self._query_expander = query_expander
         self._expand_to_neighbors = expand_to_neighbors
 
-    def retrieve(self, question: str) -> RetrievalResult:
+    def retrieve(
+        self, question: str, document_ids: list[str] | None = None
+    ) -> RetrievalResult:
         """질문과 관련된 청크를 점수 내림차순으로 돌려준다.
 
         빈 결과는 실패가 아니다 — 활성 문서가 없거나 관련 청크가 없는 것이고,
         No-answer 판단은 상위(chat_service)가 한다. 저장소 접근 실패는
         RetrievalError로 그대로 올라간다(D-005: 일반 지식으로 우회하지 않음).
+
+        document_ids를 주면 그 문서로만 좁힌다. 문서 간 비교에 필요하다 —
+        전체 검색은 점수가 높은 한 문서가 상위를 차지해 다른 문서가 밀린다
+        (2026-09-08 실측: "정격 전류" 상위 6개가 전부 G100이었고 M100은 없었음).
         """
         active_ids = self._repository.active_document_ids()
+        if document_ids is not None:
+            # 문서를 지정하면 활성 목록과 교집합만 본다. 활성 검사를 건너뛰면
+            # 색인은 끝났지만 아직 노출하지 않은 문서가 근거로 쓰인다.
+            active_ids = [item for item in active_ids if item in set(document_ids)]
         if not active_ids:
             # 검색 대상이 없으면 질문 임베딩(수십 ms의 Ollama 호출)도 아낀다.
             return RetrievalResult(chunks=[], dropped_below_threshold=0)
