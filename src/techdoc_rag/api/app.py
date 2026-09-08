@@ -90,6 +90,7 @@ def create_default_app() -> FastAPI:
     from techdoc_rag.adapters.sqlite_document_repository import SqliteDocumentRepository
     from techdoc_rag.config import load_settings
     from techdoc_rag.query.context_builder import ContextBuilder
+    from techdoc_rag.query.query_expander import QueryExpander
     from techdoc_rag.query.retriever import Retriever
 
     settings = load_settings()
@@ -127,6 +128,15 @@ def create_default_app() -> FastAPI:
             repository=repository,
             top_k=settings.retrieval.top_k,
             similarity_threshold=settings.retrieval.similarity_threshold,
+            query_expander=(
+                QueryExpander(
+                    llm_client=llm,
+                    short_query_chars=settings.retrieval.short_query_chars,
+                    max_variants=settings.retrieval.max_query_variants,
+                )
+                if settings.retrieval.expand_short_queries
+                else None
+            ),
         ),
         context_builder=ContextBuilder(budget_chars=settings.retrieval.context_budget_chars),
         llm_client=llm,
