@@ -90,6 +90,62 @@ def to_display(response: dict) -> DisplayAnswer:
         ) from error
 
 
+@dataclass(frozen=True, slots=True)
+class DisplayStep:
+    """도구 한 번 호출. label은 화면에 한 줄로 접어 보일 제목이다."""
+
+    label: str
+    result: str
+
+
+@dataclass(frozen=True, slots=True)
+class DisplayAgentAnswer:
+    text: str
+    steps: list[DisplayStep]
+    # 상한에 걸려 끊겼는지. 화면은 이때 "덜 찾은 답"이라고 알려야 한다.
+    stopped_at_limit: bool
+    evidence_pages: list[str] = field(default_factory=list)
+
+
+def to_agent_display(response: dict) -> DisplayAgentAnswer:
+    """API의 /agent 응답 JSON을 화면 표시용으로 바꾼다.
+
+    to_display와 같은 계약이다 — 응답 모양이 다르면 ApiError로 바꾼다.
+    여기는 answered 분기가 없다. 에이전트는 근거를 못 찾으면 그렇게 적은
+    문장을 답으로 내고, 화면은 그것을 그대로 보인다.
+    """
+    try:
+        steps = [
+            DisplayStep(label=_step_label(step), result=str(step["result"]))
+            for step in response.get("steps") or []
+        ]
+        return DisplayAgentAnswer(
+            text=response["text"],
+            steps=steps,
+            stopped_at_limit=bool(response["stopped_at_limit"]),
+            evidence_pages=[str(page) for page in response.get("evidence_pages") or []],
+        )
+    except (KeyError, TypeError) as error:
+        raise ApiError(
+            "API 응답 형식이 예상과 다릅니다. 서버와 화면의 버전이 맞는지 확인하세요."
+        ) from error
+
+
+def _step_label(step: dict) -> str:
+    """`compare_spec(주위 온도, ['G100', 'M100'])` 처럼 인자까지 한 줄로 적는다.
+
+    도구 이름만 적으면 같은 도구를 여러 번 부른 기록이 전부 같은 줄로 보여서
+    무엇이 달랐는지 알 수 없다.
+    """
+    arguments = step["arguments"]
+    if not isinstance(arguments, dict):
+        raise TypeError(f"arguments가 dict가 아님: {type(arguments).__name__}")
+    if not arguments:
+        return f"{step['tool']}()"
+    inside = ", ".join(f"{key}={value!r}" for key, value in arguments.items())
+    return f"{step['tool']}({inside})"
+
+
 def _page_label(citation: dict) -> str:
     pages = (
         f"p.{citation['page_start']}"
@@ -99,15 +155,20 @@ def _page_label(citation: dict) -> str:
     return f"{citation['display_name']} {pages}"
 
 
-def ask_api(base_url: str, question: str, timeout_seconds: float) -> dict:
-    """POST /chat. 실패는 화면에 보여줄 문구를 담은 ApiError로 바꾼다."""
+def ask_api(base_url: str, path: str, question: str, timeout_seconds: float) -> dict:
+    """질문을 POST한다. 실패는 화면에 보여줄 문구를 담은 ApiError로 바꾼다.
+
+    path는 "chat" 또는 "agent"다. 감싸는 함수를 따로 두지 않고 인자로 받는다 —
+    두 경로가 요청 본문도 오류 매핑도 같아서, 나누면 부르는 곳만 늘고
+    어느 경로로 나가는지는 오히려 덜 보인다.
+    """
     try:
         # 본문 조립과 Request 생성도 try 안에 둔다. 주소에 scheme이 없으면 여기서
         # ValueError가, 질문에 짝 없는 서로게이트가 있으면 인코딩에서
         # UnicodeEncodeError가 난다. 밖에 두면 그것만 예외 변환을 비껴간다.
         payload = json.dumps({"question": question}, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
-            _endpoint(base_url, "chat"),
+            _endpoint(base_url, path),
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",

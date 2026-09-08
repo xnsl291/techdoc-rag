@@ -23,6 +23,7 @@ from techdoc_rag.ui.chat_view import (
     _endpoint,
     ask_api,
     fetch_health,
+    to_agent_display,
     to_display,
 )
 
@@ -231,7 +232,7 @@ def _base_url(server, trailing_slash: bool = False) -> str:
 
 
 def test_질문이_JSON으로_전송되고_응답이_dict로_온다(fake_api) -> None:
-    body = ask_api(_base_url(fake_api), "정격 전류는?", timeout_seconds=5)
+    body = ask_api(_base_url(fake_api), "chat", "정격 전류는?", timeout_seconds=5)
 
     assert body["answered"] is True
     assert fake_api.bodies[-1] == {"question": "정격 전류는?"}
@@ -254,21 +255,21 @@ def test_422는_질문_거부_문구가_된다(fake_api) -> None:
     fake_api.behavior = "too_long"
 
     with pytest.raises(ApiError, match="거부"):
-        ask_api(_base_url(fake_api), "가" * 20, timeout_seconds=5)
+        ask_api(_base_url(fake_api), "chat", "가" * 20, timeout_seconds=5)
 
 
 def test_503은_장애_문구가_된다(fake_api) -> None:
     fake_api.behavior = "down"
 
     with pytest.raises(ApiError, match="장애"):
-        ask_api(_base_url(fake_api), "질문", timeout_seconds=5)
+        ask_api(_base_url(fake_api), "chat", "질문", timeout_seconds=5)
 
 
 def test_그밖의_상태코드도_ApiError다(fake_api) -> None:
     fake_api.behavior = "teapot"
 
     with pytest.raises(ApiError, match="418"):
-        ask_api(_base_url(fake_api), "질문", timeout_seconds=5)
+        ask_api(_base_url(fake_api), "chat", "질문", timeout_seconds=5)
 
 
 def test_JSON이_아닌_응답도_ApiError다(fake_api) -> None:
@@ -277,12 +278,12 @@ def test_JSON이_아닌_응답도_ApiError다(fake_api) -> None:
     fake_api.behavior = "html"
 
     with pytest.raises(ApiError, match="이해할 수 없습니다"):
-        ask_api(_base_url(fake_api), "질문", timeout_seconds=5)
+        ask_api(_base_url(fake_api), "chat", "질문", timeout_seconds=5)
 
 
 def test_서버가_없으면_연결_안내_문구다() -> None:
     with pytest.raises(ApiError, match="연결할 수 없습니다"):
-        ask_api("http://127.0.0.1:9", "질문", timeout_seconds=2)
+        ask_api("http://127.0.0.1:9", "chat", "질문", timeout_seconds=2)
 
 
 def test_health는_정상과_degraded를_같은_모양으로_돌려준다(fake_api) -> None:
@@ -330,7 +331,7 @@ def test_본문이_잘린_응답도_ApiError다(fake_api) -> None:
     fake_api.behavior = "short_body"
 
     with pytest.raises(ApiError):
-        ask_api(_base_url(fake_api), "질문", timeout_seconds=5)
+        ask_api(_base_url(fake_api), "chat", "질문", timeout_seconds=5)
 
 
 def test_components가_null이면_빈_dict로_정규화된다(fake_api) -> None:
@@ -374,7 +375,7 @@ def test_주소가_잘못돼도_ApiError다(base_url: str) -> None:
     """TECHDOC_API_URL 오설정에서 ValueError 계열이 그대로 새던 경로.
     빈 문자열은 현실적이다 — 환경변수를 빈 값으로 두면 기본값이 안 쓰인다."""
     with pytest.raises(ApiError):
-        ask_api(base_url, "질문", timeout_seconds=2)
+        ask_api(base_url, "chat", "질문", timeout_seconds=2)
 
     with pytest.raises(ApiError):
         fetch_health(base_url, timeout_seconds=2)
@@ -386,7 +387,7 @@ def test_깊이_중첩된_응답도_ApiError다(fake_api) -> None:
     fake_api.behavior = "deep_json"
 
     with pytest.raises(ApiError, match="이해할 수 없습니다"):
-        ask_api(_base_url(fake_api), "질문", timeout_seconds=5)
+        ask_api(_base_url(fake_api), "chat", "질문", timeout_seconds=5)
 
 
 def test_JSON_배열_응답도_ApiError다(fake_api) -> None:
@@ -394,7 +395,7 @@ def test_JSON_배열_응답도_ApiError다(fake_api) -> None:
     fake_api.behavior = "array_body"
 
     with pytest.raises(ApiError, match="형식"):
-        ask_api(_base_url(fake_api), "질문", timeout_seconds=5)
+        ask_api(_base_url(fake_api), "chat", "질문", timeout_seconds=5)
 
 
 @pytest.mark.parametrize(
@@ -412,4 +413,81 @@ def test_오류_본문을_못_읽어도_ApiError로_끝난다(fake_api, behavior
 def test_짝_없는_서로게이트_질문도_ApiError다(fake_api) -> None:
     """본문 인코딩이 try 밖에 있으면 UnicodeEncodeError만 예외 변환을 비껴간다."""
     with pytest.raises(ApiError):
-        ask_api(_base_url(fake_api), "질문\ud800", timeout_seconds=5)
+        ask_api(_base_url(fake_api), "chat", "질문\ud800", timeout_seconds=5)
+
+
+# --- 에이전트 경로 (#42) ---
+
+
+def _agent_body(**overrides) -> dict:
+    body = {
+        "text": "G100은 -10~50℃입니다.",
+        "steps": [
+            {"tool": "list_documents", "arguments": {}, "result": '{"문서": []}'},
+            {
+                "tool": "compare_spec",
+                "arguments": {"field": "주위 온도", "documents": ["G100", "M100"]},
+                "result": '{"문서별 근거": {}}',
+            },
+        ],
+        "stopped_at_limit": False,
+        "evidence_pages": ["ls-g100-v1 p.17~26"],
+    }
+    body.update(overrides)
+    return body
+
+
+def test_에이전트_질문은_agent_경로로_나간다(fake_api) -> None:
+    """경로를 잘못 보내면 /chat이 답하고, 화면에는 도구 기록 없는 답이 뜬다."""
+    ask_api(_base_url(fake_api), "agent", "비교해줘", timeout_seconds=5)
+
+    assert fake_api.paths[-1] == "/agent"
+
+
+def test_도구_호출을_인자까지_한_줄로_적는다() -> None:
+    """도구 이름만 적으면 같은 도구를 여러 번 부른 기록이 전부 같은 줄로 보인다."""
+    display = to_agent_display(_agent_body())
+
+    assert [step.label for step in display.steps] == [
+        "list_documents()",
+        "compare_spec(field='주위 온도', documents=['G100', 'M100'])",
+    ]
+    assert display.steps[1].result == '{"문서별 근거": {}}'
+
+
+def test_에이전트_응답의_근거_쪽과_상한_표시를_넘긴다() -> None:
+    display = to_agent_display(_agent_body(stopped_at_limit=True))
+
+    assert display.evidence_pages == ["ls-g100-v1 p.17~26"]
+    assert display.stopped_at_limit is True
+
+
+def test_도구를_안_쓴_답도_그대로_보인다() -> None:
+    """에이전트는 근거를 못 찾으면 그렇게 적은 문장을 답으로 낸다.
+    화면이 그것을 감추면 사용자는 아무 답도 못 받는다."""
+    display = to_agent_display(
+        _agent_body(text="근거 자료에서 확인할 수 없습니다.", steps=[], evidence_pages=[])
+    )
+
+    assert display.text == "근거 자료에서 확인할 수 없습니다."
+    assert display.steps == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"steps": [], "stopped_at_limit": False},  # text 없음
+        {"text": "답", "steps": []},  # stopped_at_limit 없음
+        {"text": "답", "steps": ["문자열 기록"], "stopped_at_limit": False},
+        {
+            "text": "답",
+            "steps": [{"tool": "t", "arguments": ["목록"], "result": ""}],
+            "stopped_at_limit": False,
+        },
+    ],
+)
+def test_에이전트_응답_모양이_다르면_ApiError다(body: dict) -> None:
+    """서버 버전이 어긋났을 때 실제로 도달하는 경로다. KeyError·TypeError를
+    그대로 올리면 호출부가 ApiError만 잡고 있어 화면에 스택트레이스가 뜬다."""
+    with pytest.raises(ApiError, match="형식"):
+        to_agent_display(body)
