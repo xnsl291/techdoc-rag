@@ -26,6 +26,11 @@ from techdoc_rag.ui.chat_view import (
     to_display,
 )
 
+# json.loads가 RecursionError를 내게 하는 중첩 깊이. 실측 하한은
+# Windows/3.13에서 1,000<d<=3,000, Linux/3.12에서는 3,000보다 큼.
+# 본문은 약 98KB로 테스트에 부담이 없다.
+_OVER_PARSE_LIMIT = 50_000
+
 
 def _citation(used: bool) -> dict:
     return {
@@ -131,7 +136,11 @@ class _FakeApiHandler(BaseHTTPRequestHandler):
         elif behavior == "html":
             self._reply(200, "<html>다른 서버입니다</html>")
         elif behavior == "deep_json":
-            self._reply(200, "[" * 3000 + "]" * 3000)
+            # 파싱 한도를 넘겨 RecursionError를 내는 것이 목적이다. 그 한도는
+            # 플랫폼마다 다르다 — 깊이 3,000은 Windows/3.13에서는 넘지만
+            # Linux/3.12에서는 그대로 파싱된다(CI 34194719381). 어디서도
+            # 넘도록 충분히 키운다.
+            self._reply(200, "[" * _OVER_PARSE_LIMIT + "]" * _OVER_PARSE_LIMIT)
         elif behavior == "array_body":
             self._reply(200, "[1, 2, 3]")
         elif behavior == "short_body":
@@ -168,7 +177,7 @@ class _FakeApiHandler(BaseHTTPRequestHandler):
         elif behavior == "bad_components":
             self._reply(200, json.dumps({"status": "ok", "components": ["sqlite", "llm"]}))
         elif behavior == "error_deep_json":
-            self._reply(503, "[" * 3000 + "]" * 3000)
+            self._reply(503, "[" * _OVER_PARSE_LIMIT + "]" * _OVER_PARSE_LIMIT)
         elif behavior == "error_huge_int":
             self._reply(503, '{"detail": ' + "1" * 5000 + "}")
         elif behavior == "error_array":
