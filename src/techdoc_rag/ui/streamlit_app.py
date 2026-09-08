@@ -1,4 +1,9 @@
-"""질의 화면 (#29). UC-1(Manual QA) 데모.
+"""질의 화면 (#29, #42). UC-1(Manual QA) 데모.
+
+질의 방식이 둘이다. **일반 질의**는 검색 한 번에 답 하나이고, 인용 번호로
+답변이 근거를 실제로 썼는지 확인한다(DP-56). **에이전트**는 모델이 도구를
+골라 여러 번 찾고, 그 호출 기록을 화면에 펼쳐 보인다 — 제품 간 비교처럼
+몇 번을 어떤 순서로 찾을지가 질문마다 다른 경우에 쓴다(#42).
 
 실행 (FastAPI가 먼저 떠 있어야 함):
     uvicorn --factory techdoc_rag.api.app:create_default_app \
@@ -22,7 +27,15 @@ import os
 
 import streamlit as st
 
-from techdoc_rag.ui.chat_view import ApiError, DisplayAnswer, ask_api, fetch_health, to_display
+from techdoc_rag.ui.chat_view import (
+    ApiError,
+    DisplayAgentAnswer,
+    DisplayAnswer,
+    ask_api,
+    fetch_health,
+    to_agent_display,
+    to_display,
+)
 
 API_BASE_URL = os.getenv("TECHDOC_API_URL", "http://127.0.0.1:8000")
 # 생성 상한(300초) + 대기 여유. API 쪽 타임아웃보다 짧으면 서버는 아직
@@ -51,6 +64,18 @@ with st.sidebar:
             st.caption("보고된 구성요소가 없습니다.")
     except ApiError as error:
         st.error(str(error))
+
+    st.divider()
+    st.subheader("질의 방식")
+    mode = st.radio(
+        "질의 방식",
+        options=["일반 질의", "에이전트"],
+        captions=[
+            "검색 한 번, 답 하나. 인용 번호로 근거 사용을 확인합니다.",
+            "모델이 도구를 골라 여러 번 찾습니다. 제품 간 비교에 씁니다.",
+        ],
+        label_visibility="collapsed",
+    )
 
 if "history" not in st.session_state:
     st.session_state.history = []  # (질문, DisplayAnswer | ApiError 문구)
@@ -86,29 +111,59 @@ def _render_answer(display: DisplayAnswer) -> None:
                 st.markdown(f"- {citation.label}")
 
 
+def _render_agent_answer(display: DisplayAgentAnswer) -> None:
+    """답변보다 호출 기록을 먼저 보인다.
+
+    무엇을 근거로 답했는지가 답 자체만큼 중요하다. 에이전트는 순서를 모델이
+    정하므로, 기록이 없으면 왜 그런 답이 나왔는지 되짚을 수 없다.
+    """
+    if display.stopped_at_limit:
+        # 덜 찾고 끊긴 답을 다 찾은 답처럼 보이면 안 된다.
+        st.warning("도구 호출 상한에 걸려 중간에 끊었습니다. 근거가 부족할 수 있습니다.")
+    if display.steps:
+        with st.expander(f"🔧 도구 호출 {len(display.steps)}회", expanded=True):
+            for index, step in enumerate(display.steps, start=1):
+                st.markdown(f"**{index}. `{step.label}`**")
+                st.code(step.result, language="json")
+    else:
+        st.caption("도구를 부르지 않고 답했습니다.")
+    st.markdown(display.text)
+    if display.evidence_pages:
+        # "답변에 사용된 근거"라고 쓰지 않는다. 도구가 가져온 것일 뿐,
+        # 답변에 실제로 쓰였는지는 이 경로에서 확인하지 않는다(DP-56 미적용).
+        st.markdown("**도구가 가져온 근거**")
+        for page in display.evidence_pages:
+            st.markdown(f"- {page}")
+
+
+def _render(result: object) -> None:
+    if isinstance(result, DisplayAnswer):
+        _render_answer(result)
+    elif isinstance(result, DisplayAgentAnswer):
+        _render_agent_answer(result)
+    else:
+        st.error(result)
+
+
 for past_question, past_result in st.session_state.history:
     with st.chat_message("user"):
         st.write(past_question)
     with st.chat_message("assistant"):
-        if isinstance(past_result, DisplayAnswer):
-            _render_answer(past_result)
-        else:
-            st.error(past_result)
+        _render(past_result)
 
 question = st.chat_input("매뉴얼에 대해 질문하세요")
 if question:
     with st.chat_message("user"):
         st.write(question)
     with st.chat_message("assistant"):
-        with st.spinner("근거를 찾고 답을 만드는 중..."):
+        agent_mode = mode == "에이전트"
+        spinner = "도구를 골라 찾는 중..." if agent_mode else "근거를 찾고 답을 만드는 중..."
+        with st.spinner(spinner):
             try:
-                display: DisplayAnswer | str = to_display(
-                    ask_api(API_BASE_URL, "chat", question, REQUEST_TIMEOUT_SECONDS)
-                )
+                path = "agent" if agent_mode else "chat"
+                body = ask_api(API_BASE_URL, path, question, REQUEST_TIMEOUT_SECONDS)
+                display: object = to_agent_display(body) if agent_mode else to_display(body)
             except ApiError as error:
                 display = str(error)
-        if isinstance(display, DisplayAnswer):
-            _render_answer(display)
-        else:
-            st.error(display)
+        _render(display)
     st.session_state.history.append((question, display))
