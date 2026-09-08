@@ -190,8 +190,10 @@ def _decode(raw: bytes) -> dict:
     except (ValueError, RecursionError) as error:
         # JSONDecodeError·UnicodeDecodeError는 ValueError 하위이고, 4,300자리를
         # 넘는 정수 리터럴도 평범한 ValueError로 온다. RecursionError는
-        # RuntimeError 하위라 따로 적어야 한다 — 깊이 3,000쯤 중첩된 6KB 응답이면
-        # 여기서 나고, 그대로 새면 사이드바에서 페이지 전체가 죽는다(리뷰 #30 4차).
+        # RuntimeError 하위라 따로 적어야 한다 — 깊게 중첩된 응답이면 여기서 나고,
+        # 그대로 새면 사이드바에서 페이지 전체가 죽는다(리뷰 #30 4차).
+        # 몇 겹부터 나는지는 플랫폼이 정한다. 같은 깊이 3,000이 Windows/3.13에서는
+        # RecursionError를 내고 Linux/3.12에서는 그대로 파싱됐다(CI 34194719381).
         raise ApiError(
             "API 응답을 이해할 수 없습니다. 주소가 이 서비스의 것이 맞는지 확인하세요."
         ) from error
