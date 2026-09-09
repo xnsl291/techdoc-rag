@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from techdoc_rag.agent.agent_service import AgentAnswer, AgentService
 from techdoc_rag.domain.answer import Answer
 
 
@@ -56,6 +57,67 @@ class ChatResponse(BaseModel):
             ),
             answered=answer.is_answered,
         )
+
+
+# 도구 결과 하나를 응답에 담을 때의 길이 상한. compare_spec이 돌려주는 근거 수는
+# 모델이 정한 문서 수만큼 늘어나므로, 상한이 없으면 응답 크기를 예측할 수 없다.
+#
+# 2026-09-08 실측(문서 2권, top_k=8): list_documents 134자,
+# compare_spec 2문서 3,744~3,778자, search_manual 전체 11,267자.
+# 처음 정한 2,000자는 평범한 2문서 비교에서 이미 걸려서, 병리적인 경우가 아니라
+# 정상 경우를 자르고 있었다. 실측 최대값이 들어가고 문서를 많이 지정한
+# compare_spec은 여전히 막히도록 12,000자로 잡는다.
+MAX_STEP_RESULT_CHARS = 12000
+TRUNCATION_MARK = "…(이하 잘림)"
+
+
+class AgentStepModel(BaseModel):
+    """도구 한 번 호출과 그 결과.
+
+    result는 감사와 화면 표시용이다. 상한에서 자르므로 JSON으로 다시 파싱할 수
+    있다고 보장하지 않는다. 값이 필요하면 evidence_pages를 본다.
+    """
+
+    tool: str
+    arguments: dict
+    result: str
+
+
+class AgentResponse(BaseModel):
+    """에이전트 답변.
+
+    ChatResponse를 재사용하지 않는다. 그쪽 citations의 is_used_in_answer는
+    본문의 인용 번호로 확인한 값인데(DP-56), 에이전트 경로에는 그 장치가 없다.
+    같은 필드에 담으면 확인하지 않은 것을 확인한 것처럼 내보내게 된다.
+    answered·no_answer_reason도 에이전트가 만들지 않는 값이다.
+    """
+
+    text: str
+    steps: list[AgentStepModel]
+    # 도구 호출 상한에서 끊겼는지. 화면에서 "덜 찾은 답"을 구분하는 데 쓴다.
+    stopped_at_limit: bool
+    # 도구 결과에서 모은 "문서 p.쪽". 답변에 실제로 쓰였는지까지는 알 수 없다.
+    evidence_pages: list[str]
+
+    @classmethod
+    def from_answer(cls, answer: AgentAnswer) -> AgentResponse:
+        return cls(
+            text=answer.text,
+            steps=[
+                AgentStepModel(
+                    tool=step.tool, arguments=step.arguments, result=_clip(step.result)
+                )
+                for step in answer.steps
+            ],
+            stopped_at_limit=answer.stopped_at_limit,
+            evidence_pages=AgentService.evidence_pages(answer.steps),
+        )
+
+
+def _clip(result: str) -> str:
+    if len(result) <= MAX_STEP_RESULT_CHARS:
+        return result
+    return result[:MAX_STEP_RESULT_CHARS] + TRUNCATION_MARK
 
 
 class HealthResponse(BaseModel):

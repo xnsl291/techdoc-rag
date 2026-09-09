@@ -324,3 +324,54 @@ def test_확장을_끄면_이웃을_조회하지_않는다() -> None:
 
     assert store.neighbor_calls == []
     assert [r.chunk.chunk_id for r in result.chunks] == ["b"]
+
+
+class ScopeRecordingStore(PerQueryStore):
+    """어떤 문서 범위로 검색이 불렸는지 기록한다."""
+
+    def __init__(self, by_vector) -> None:
+        super().__init__(by_vector)
+        self.scopes: list[list[str]] = []
+
+    def search(self, query_vector, top_k, active_document_ids):
+        self.scopes.append(list(active_document_ids))
+        return super().search(query_vector, top_k, active_document_ids)
+
+
+def _scoped_retriever(store) -> Retriever:
+    return Retriever(
+        embedding_model=RecordingEmbedding(),
+        vector_store=store,
+        repository=FakeRepository(["ls-m100-v1", "ls-g100-v1"]),
+        top_k=5,
+        similarity_threshold=0.0,
+    )
+
+
+def test_문서를_지정하면_그_문서로만_검색한다() -> None:
+    """전체 검색은 점수 높은 한 문서가 상위를 차지한다. 비교하려면 좁혀야 한다
+    (2026-09-08 실측: '정격 전류' 상위 6개가 전부 G100이었음)."""
+    store = ScopeRecordingStore({2.0: [_retrieved("a", 0.9)]})
+
+    _scoped_retriever(store).retrieve("질문", document_ids=["ls-g100-v1"])
+
+    assert store.scopes == [["ls-g100-v1"]]
+
+
+def test_지정하지_않으면_활성_문서_전체를_본다() -> None:
+    store = ScopeRecordingStore({2.0: [_retrieved("a", 0.9)]})
+
+    _scoped_retriever(store).retrieve("질문")
+
+    assert store.scopes == [["ls-m100-v1", "ls-g100-v1"]]
+
+
+def test_활성이_아닌_문서를_지정하면_검색하지_않는다() -> None:
+    """활성 검사를 건너뛰면 색인은 끝났지만 아직 노출하지 않은 문서가
+    근거로 쓰인다."""
+    store = ScopeRecordingStore({2.0: [_retrieved("a", 0.9)]})
+
+    result = _scoped_retriever(store).retrieve("질문", document_ids=["ls-s300-v1"])
+
+    assert store.scopes == []  # 검색 자체를 하지 않는다
+    assert result.chunks == []

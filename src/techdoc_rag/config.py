@@ -69,6 +69,11 @@ class ApiSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentSettings:
+    max_steps: int
+
+
+@dataclass(frozen=True, slots=True)
 class StorageSettings:
     document_root: Path
     metadata_database_path: Path
@@ -86,6 +91,7 @@ class Settings:
     indexing: IndexingSettings
     retrieval: RetrievalSettings
     api: ApiSettings
+    agent: AgentSettings
     storage: StorageSettings
     prompt_version: str
 
@@ -180,6 +186,9 @@ def load_settings(settings_path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
             max_question_chars=int(
                 _require(raw.get("api", {}), "max_question_chars", "api")
             ),
+        ),
+        agent=AgentSettings(
+            max_steps=int(_require(raw.get("agent", {}), "max_steps", "agent")),
         ),
         storage=StorageSettings(
             document_root=PROJECT_ROOT / _require(storage_section, "document_root", "storage"),
