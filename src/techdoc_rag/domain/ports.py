@@ -10,6 +10,7 @@ adapters 패키지의 구현체는 여기를 import하지 않는다. 구조적 �
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -258,3 +259,41 @@ class LlmClient(Protocol):
     def model_name(self) -> str: ...
 
     def generate(self, prompt: str, max_tokens: int) -> Iterator[str]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    """모델이 부르기로 정한 도구 하나."""
+
+    name: str
+    arguments: dict
+
+
+@dataclass(frozen=True, slots=True)
+class ChatTurn:
+    """도구 호출 한 차례의 응답.
+
+    tool_calls가 있으면 아직 답이 아니다. 도구를 실행해 결과를 넣고 다시 물어야
+    한다. 비어 있으면 content가 최종 답이다.
+    """
+
+    content: str
+    tool_calls: list[ToolCall]
+
+
+class ToolCallingClient(Protocol):
+    """도구를 붙여 한 차례 대화하는 클라이언트.
+
+    답변 생성(LlmClient.generate)과 나눈 이유는 성격이 다르기 때문이다. 답변은
+    사용자가 기다리므로 스트리밍하고 중간에 취소한다. 도구 호출은 모델이 무엇을
+    부를지 정하는 내부 단계라 전부 받아야 판단할 수 있고, 사용자에게 보일 것도
+    없다.
+
+    **동시 생성 제한을 답변 생성과 나눠 갖지 않는다.** 둘이 각자 한도를 세면
+    합쳐서 둘이 동시에 도는데, 그것은 DP-51이 막으려던 상태다. 같은 추론
+    자원을 쓰므로 한도도 하나여야 한다.
+    """
+
+    def chat(
+        self, messages: list[dict], tools: list[dict], max_tokens: int
+    ) -> ChatTurn: ...

@@ -19,8 +19,10 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from techdoc_rag.domain.errors import GenerationError
+from techdoc_rag.domain.ports import ChatTurn, ToolCall
 
 _GENERATE_PATH = "/api/generate"
+_CHAT_PATH = "/api/chat"
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +160,77 @@ class OllamaLlmClient:
                 completed=completed,
             )
             self._semaphore.release()
+
+    def chat(self, messages: list[dict], tools: list[dict], max_tokens: int) -> ChatTurn:
+        """도구를 붙여 한 차례 물어본다. 스트리밍하지 않는다.
+
+        모델이 무엇을 부를지 정하는 내부 단계라 전부 받아야 판단할 수 있고,
+        사용자에게 보일 것도 없다. 답변 생성과 **같은 세마포어**를 쓴다 —
+        둘이 각자 한도를 세면 합쳐서 둘이 동시에 돌고, 그것은 DP-51이 막으려던
+        상태다.
+        """
+        payload = json.dumps(
+            {
+                "model": self._model_name,
+                "messages": messages,
+                "tools": tools,
+                "stream": False,
+                "think": self._thinking_enabled,
+                "options": {
+                    "temperature": self._temperature,
+                    "num_ctx": self._runtime_context_tokens,
+                    "num_predict": max_tokens,
+                },
+            }
+        ).encode("utf-8")
+
+        if not self._semaphore.acquire(timeout=self._queue_timeout_seconds):
+            raise GenerationError(
+                f"도구 호출 대기 초과: {self._queue_timeout_seconds}초 (DP-51)"
+            )
+        try:
+            body = self._request_json(_CHAT_PATH, payload)
+        finally:
+            self._semaphore.release()
+
+        message = body.get("message") or {}
+        calls = []
+        for raw in message.get("tool_calls") or []:
+            function = raw.get("function") or {}
+            name = function.get("name")
+            if not name:
+                continue
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                # 어떤 모델은 인자를 JSON 문자열로 준다. 파싱에 실패하면 빈
+                # 인자로 넘겨 도구 쪽이 "인자가 비었음"을 알려 주게 한다.
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+            calls.append(ToolCall(name=name, arguments=arguments or {}))
+        return ChatTurn(content=message.get("content") or "", tool_calls=calls)
+
+    def _request_json(self, path: str, payload: bytes) -> dict:
+        """한 번 보내고 JSON 하나를 받는다. 스트리밍 경로와 달리 응답을 통째로 읽는다."""
+        try:
+            connection = self._ensure_connection()
+            connection.request(
+                "POST", path, body=payload, headers={"Content-Type": "application/json"}
+            )
+            response = connection.getresponse()
+            raw = response.read()
+        except (http.client.HTTPException, ConnectionError, TimeoutError, OSError) as exc:
+            self.close()
+            raise GenerationError(f"LLM 서버 접속 실패: {self._host}:{self._port} ({exc})") from exc
+        if response.status != 200:
+            self.close()
+            raise GenerationError(f"도구 호출 실패: HTTP {response.status} {raw[:200]!r}")
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            self.close()
+            raise GenerationError(f"응답이 JSON이 아님: {raw[:120]!r}") from exc
 
     def _send(self, prompt: str, max_tokens: int) -> http.client.HTTPResponse:
         payload = json.dumps(
