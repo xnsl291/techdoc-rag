@@ -1,5 +1,7 @@
 # techdoc-rag
 
+[![test](https://github.com/xnsl291/techdoc-rag/actions/workflows/test.yml/badge.svg)](https://github.com/xnsl291/techdoc-rag/actions/workflows/test.yml)
+
 문서가 많은 조직에서 **"규정 어디에 뭐라고 적혀 있나"를 찾는 반복 업무**를 줄이는 문서 질의응답 시스템.
 
 매뉴얼·약관·규정처럼 길고 표가 많은 문서를 대상으로, 질문을 받아 **근거 문서와 페이지를 붙여** 답한다. 근거를 찾지 못하면 답을 지어내지 않고 **찾지 못했다고 답한다.**
@@ -11,6 +13,18 @@
 답변: 인버터 설치 시 주위 온도는 -10~50℃입니다 [2].
 근거: M100 사용설명서 p.12~18  (답변에 사용됨)
 ```
+
+## 이 저장소에서 볼 것
+
+기능 목록보다 **판단 과정**을 남기는 데 무게를 두었다. 처음 보는 사람이 볼 만한 자리를 짚어 둔다.
+
+| 보고 싶은 것 | 어디 |
+|---|---|
+| 틀린 답의 원인을 어떻게 좁혔는가 | 아래 "만들면서 확인한 것" |
+| 기술 선택의 근거와 버린 대안 | 이슈 [#34](https://github.com/xnsl291/techdoc-rag/issues/34)(표 파서 도입 보류), [#32](https://github.com/xnsl291/techdoc-rag/issues/32)(답변 품질) |
+| 코드 리뷰를 어떻게 받았는가 | PR [#30](https://github.com/xnsl291/techdoc-rag/pull/30)(리뷰 4라운드), [#36](https://github.com/xnsl291/techdoc-rag/pull/36) |
+| 계약을 코드로 어떻게 못 박았는가 | `src/techdoc_rag/domain/ports.py` |
+| 실패를 어떻게 구분하는가 | `src/techdoc_rag/domain/errors.py`, `domain/answer.py` |
 
 ## 왜 이렇게 만들었나 — 감사·규제 관점
 
@@ -34,7 +48,7 @@
 | 질의 → 검색 → 근거 조립 → 생성 → 인용 | 완료 |
 | HTTP API (`/chat`, `/health`) | 완료 |
 | 화면 (Streamlit) | 완료 |
-| 자동 테스트 | 196건 |
+| 자동 테스트 | 226건 (PR·main 푸시마다 CI 실행) |
 | **평가셋** | **미작성** — 아래 "아직 못 한 것" 참고 |
 | 구조화 추출(UC-2), 문서 간 비교 | 설계만 |
 
