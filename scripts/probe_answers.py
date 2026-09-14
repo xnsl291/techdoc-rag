@@ -1,4 +1,4 @@
-"""고정 질문 묶음으로 답변을 뽑아 파일로 남긴다 — 변경 전후 비교용.
+"""고정 질문 묶음으로 답변을 뽑아 파일로 남긴다. 변경 전후 비교용.
 
 **평가셋이 아니다.** 정답 라벨이 없으므로 점수를 매기지 않는다. 하는 일은
 "같은 질문에 어떤 근거를 골라 뭐라고 답했는가"를 같은 조건에서 두 번 재서
@@ -8,6 +8,10 @@
 - 같은 뜻을 다르게 물었을 때 답이 갈리는가 (2026-09-07에 갈리는 것을 확인)
 - 답이 잘 나오던 질문이 변경 후에도 그대로인가 (회귀 확인)
 - 무관한 질문을 여전히 거절하는가
+
+**두 경로를 한 번에 잰다.** chat은 검색 한 번에 답 하나이고, agent는 도구를
+골라 여러 번 찾는다(#42). 둘이 같은 Retriever를 공유하므로(DP-58) 검색 쪽을
+고치면 양쪽이 같이 움직인다. 한쪽만 재면 다른 쪽이 나빠진 것을 놓친다.
 
 사용:
     python scripts/probe_answers.py --label baseline
@@ -37,6 +41,8 @@ from techdoc_rag.adapters.qdrant_vector_store import QdrantVectorStore  # noqa: 
 from techdoc_rag.adapters.sqlite_document_repository import (  # noqa: E402
     SqliteDocumentRepository,
 )
+from techdoc_rag.agent.agent_service import NO_ANSWER_TEXT, AgentService  # noqa: E402
+from techdoc_rag.agent.tools import ToolBox  # noqa: E402
 from techdoc_rag.config import load_settings  # noqa: E402
 from techdoc_rag.query.chat_service import PROMPT_VERSION, ChatService  # noqa: E402
 from techdoc_rag.query.context_builder import ContextBuilder  # noqa: E402
@@ -56,8 +62,20 @@ QUESTIONS = [
     ("무관", "김치찌개를 맛있게 끓이는 방법은?"),
 ]
 
+# 에이전트 경로(#42)는 파이프라인으로 못 하는 것을 본다. 두 경로를 한 번에 재는
+# 이유는 같은 Retriever를 공유하기 때문이다(DP-58). 검색 쪽을 고치면 양쪽이
+# 같이 움직이므로, 한쪽만 재면 다른 쪽이 나빠진 것을 놓친다.
+AGENT_QUESTIONS = [
+    ("비교", "G100과 M100의 주위 온도 조건을 비교해줘"),
+    # "비교"라는 말을 쓰지 않았다. 비교 질문임을 모델이 알아채는지 본다.
+    ("비교", "두 제품 정격 전류가 어떻게 달라?"),
+    ("문서지정", "G100의 정격 전류는?"),
+    ("없는제품", "S9999 제품의 정격 출력은?"),
+    ("목록", "어떤 매뉴얼을 갖고 있어?"),
+]
 
-def _build_service() -> tuple[ChatService, dict]:
+
+def _build_services() -> tuple[ChatService, AgentService, dict]:
     settings = load_settings()
     repository = SqliteDocumentRepository(settings.storage.metadata_database_path)
     repository.initialize()
@@ -84,27 +102,36 @@ def _build_service() -> tuple[ChatService, dict]:
         queue_timeout_seconds=settings.llm.queue_timeout_seconds,
         generation_timeout_seconds=settings.llm.generation_timeout_seconds,
     )
-    service = ChatService(
-        retriever=Retriever(
-            embedding_model=embedding,
-            vector_store=vector_store,
-            repository=repository,
-            top_k=settings.retrieval.top_k,
-            similarity_threshold=settings.retrieval.similarity_threshold,
-            query_expander=(
-                QueryExpander(
-                    llm_client=llm,
-                    short_query_chars=settings.retrieval.short_query_chars,
-                    max_variants=settings.retrieval.max_query_variants,
-                )
-                if settings.retrieval.expand_short_queries
-                else None
-            ),
-            expand_to_neighbors=settings.retrieval.expand_evidence_to_neighbors,
+    # 두 경로가 같은 Retriever를 쓴다. 운영 조립 지점(api/app.py)과 같은 구성이라야
+    # 프로브 결과가 실제 동작을 대변한다.
+    retriever = Retriever(
+        embedding_model=embedding,
+        vector_store=vector_store,
+        repository=repository,
+        top_k=settings.retrieval.top_k,
+        similarity_threshold=settings.retrieval.similarity_threshold,
+        query_expander=(
+            QueryExpander(
+                llm_client=llm,
+                short_query_chars=settings.retrieval.short_query_chars,
+                max_variants=settings.retrieval.max_query_variants,
+            )
+            if settings.retrieval.expand_short_queries
+            else None
         ),
+        expand_to_neighbors=settings.retrieval.expand_evidence_to_neighbors,
+    )
+    service = ChatService(
+        retriever=retriever,
         context_builder=ContextBuilder(budget_chars=settings.retrieval.context_budget_chars),
         llm_client=llm,
         repository=repository,
+        max_answer_tokens=settings.llm.generation_max_tokens,
+    )
+    agent = AgentService(
+        llm_client=llm,
+        toolbox=ToolBox(retriever=retriever, repository=repository),
+        max_steps=settings.agent.max_steps,
         max_answer_tokens=settings.llm.generation_max_tokens,
     )
     # 무엇으로 낸 결과인지 함께 남긴다. 이게 없으면 두 결과의 차이가
@@ -118,14 +145,17 @@ def _build_service() -> tuple[ChatService, dict]:
         "context_budget_chars": settings.retrieval.context_budget_chars,
         "generation_max_tokens": settings.llm.generation_max_tokens,
         "prompt_version": PROMPT_VERSION,
+        "agent_max_steps": settings.agent.max_steps,
     }
-    return service, conditions
+    return service, agent, conditions
 
 
 def run(label: str) -> int:
-    service, conditions = _build_service()
+    service, agent, conditions = _build_services()
     print(f"조건: {json.dumps(conditions, ensure_ascii=False)}")
     records = []
+
+    print("\n[chat 경로]")
     for group, question in QUESTIONS:
         started = time.perf_counter()
         answer = service.ask(question)
@@ -135,17 +165,47 @@ def run(label: str) -> int:
         ]
         records.append(
             {
+                "path": "chat",
                 "group": group,
                 "question": question,
                 "verdict": answer.no_answer_reason or "ANSWERED",
                 "text": answer.text.strip(),
-                "used_pages": used,
+                "pages": used,
                 "all_pages": [f"p.{c.page_start}~{c.page_end}" for c in answer.citations],
                 "seconds": round(elapsed, 2),
             }
         )
         print(f"  [{group}] {question}")
         print(f"      {records[-1]['verdict']} / {elapsed:.1f}s / 근거 {used}")
+        print(f"      {answer.text.strip()[:110]}")
+
+    print("\n[agent 경로]")
+    for group, question in AGENT_QUESTIONS:
+        started = time.perf_counter()
+        answer = agent.ask(question)
+        elapsed = time.perf_counter() - started
+        # chat의 verdict과 뜻을 맞춘다. 다만 근거 사용 여부는 확인하지 않는다.
+        # 도구 결과에 청크 ID가 없어 인용 번호 방식(DP-56)을 쓸 수 없기 때문이다.
+        verdict = "NO_ANSWER" if answer.text.strip() == NO_ANSWER_TEXT else "ANSWERED"
+        if answer.stopped_at_limit:
+            verdict += "_AT_LIMIT"
+        tools = answer.used_tools
+        pages = AgentService.evidence_pages(answer.steps)
+        records.append(
+            {
+                "path": "agent",
+                "group": group,
+                "question": question,
+                "verdict": verdict,
+                "text": answer.text.strip(),
+                "pages": pages,
+                "tools": tools,
+                "seconds": round(elapsed, 2),
+            }
+        )
+        print(f"  [{group}] {question}")
+        print(f"      {verdict} / {elapsed:.1f}s / 도구 {tools}")
+        print(f"      근거 {pages[:4]}")
         print(f"      {answer.text.strip()[:110]}")
 
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
@@ -161,16 +221,16 @@ def run(label: str) -> int:
 
 def _summarize(records: list[dict]) -> None:
     """같은 뜻 묶음에서 근거가 얼마나 일치하는지. 낮으면 표현에 흔들린다는 뜻."""
-    groups: dict[str, list[dict]] = {}
+    groups: dict[tuple[str, str], list[dict]] = {}
     for record in records:
-        groups.setdefault(record["group"], []).append(record)
+        groups.setdefault((record["path"], record["group"]), []).append(record)
     print("\n묶음별 근거 일치")
-    for group, items in groups.items():
+    for (path, group), items in groups.items():
         if len(items) < 2:
             continue
-        page_sets = [set(item["used_pages"]) for item in items]
+        page_sets = [set(item["pages"]) for item in items]
         shared = set.intersection(*page_sets) if all(page_sets) else set()
-        print(f"  {group}: {len(items)}개 질문, 공통 근거 {sorted(shared) or '없음'}")
+        print(f"  [{path}] {group}: {len(items)}개 질문, 공통 근거 {sorted(shared) or '없음'}")
 
 
 def compare(left: str, right: str) -> int:
@@ -185,15 +245,36 @@ def compare(left: str, right: str) -> int:
         if a["conditions"][key] != b["conditions"].get(key)
     }
     print(f"바뀐 조건: {json.dumps(changed, ensure_ascii=False) if changed else '없음'}\n")
-    for old, new in zip(a["records"], b["records"], strict=True):
+
+    # 순서대로 짝짓지 않고 (경로, 질문)으로 찾는다. 질문을 더하거나 뺀 뒤에도
+    # 나머지를 비교할 수 있어야 하고, 없어진 질문을 조용히 넘기면 안 된다.
+    def key_of(record: dict) -> tuple[str, str]:
+        return (record.get("path", "chat"), record["question"])
+
+    before = {key_of(r): r for r in a["records"]}
+    after = {key_of(r): r for r in b["records"]}
+
+    for key in sorted(after.keys() - before.keys()):
+        print(f"[새 질문] ({key[0]}) {key[1]}")
+    for key in sorted(before.keys() - after.keys()):
+        print(f"[빠진 질문] ({key[0]}) {key[1]}")
+
+    for key, new in after.items():
+        old = before.get(key)
+        if old is None:
+            continue
         marks = []
         if old["verdict"] != new["verdict"]:
-            marks.append(f"판정 {old['verdict']}→{new['verdict']}")
-        if old["used_pages"] != new["used_pages"]:
-            marks.append(f"근거 {old['used_pages']}→{new['used_pages']}")
+            marks.append(f"판정 {old['verdict']}에서 {new['verdict']}로")
+        # 옛 파일은 used_pages였다. 키 이름이 바뀐 것을 변화로 잘못 읽지 않게 한다.
+        old_pages = old.get("pages", old.get("used_pages", []))
+        if old_pages != new["pages"]:
+            marks.append(f"근거 {old_pages}에서 {new['pages']}로")
+        if old.get("tools") != new.get("tools"):
+            marks.append(f"도구 {old.get('tools')}에서 {new.get('tools')}로")
         if old["text"] != new["text"]:
             marks.append("답변 문구 바뀜")
-        print(f"[{new['group']}] {new['question']}")
+        print(f"[{new['path']}/{new['group']}] {new['question']}")
         print(f"   {' / '.join(marks) if marks else '변화 없음'}")
         if old["text"] != new["text"]:
             print(f"   전: {old['text'][:90]}")
