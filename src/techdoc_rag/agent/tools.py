@@ -96,8 +96,10 @@ class ToolBox:
                     "description": (
                         "여러 문서에서 같은 항목의 근거를 각각 찾아 함께 돌려준다. "
                         "제품 간 사양을 비교할 때 쓴다. 전체 검색은 한 문서에 "
-                        "치우치므로 비교에는 이 도구를 쓴다. 같은지 다른지는 "
-                        "돌려받은 근거를 보고 직접 판단한다."
+                        "치우치므로 비교에는 이 도구를 쓴다. "
+                        "사용자가 '두 제품', '둘 다', '양쪽'처럼 제품 이름을 대지 "
+                        "않고 물어도 이 도구를 쓴다. documents를 비우면 된다. "
+                        "같은지 다른지는 돌려받은 근거를 보고 직접 판단한다."
                     ),
                     "parameters": {
                         "type": "object",
@@ -109,10 +111,13 @@ class ToolBox:
                             "documents": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "비교할 제품명 목록. 둘 이상",
+                                "description": (
+                                    "비교할 제품명 목록. 사용자가 이름을 대지 않았으면 "
+                                    "비운다. 비우면 색인된 문서를 전부 비교한다"
+                                ),
                             },
                         },
-                        "required": ["field", "documents"],
+                        "required": ["field"],
                     },
                 },
             },
@@ -186,6 +191,15 @@ class ToolBox:
     def _compare(self, field: str, documents: list[str]) -> str:
         if not field.strip():
             return json.dumps({"오류": "비교할 항목이 비었음"}, ensure_ascii=False)
+        # 비었으면 색인된 문서를 전부 비교한다. documents를 필수로 두었더니
+        # "두 제품 정격 전류가 어떻게 달라?"처럼 이름을 대지 않은 물음에서 모델이
+        # 이 칸을 채울 수 없어 compare_spec을 포기하고 search_manual로 갔고,
+        # 근거가 한 문서에만 쏠렸다(#48, 실측 2026-09-14에 3회 재현).
+        #
+        # 결과 크기는 문서 수에 비례해 커진다. 문서 2권에서 2,073토큰이므로
+        # 지금은 여유가 있으나, 문서를 늘리면 #45의 컨텍스트 한도에 먼저 걸린다.
+        if not documents:
+            documents = list(self._documents())
         if len(documents) < 2:
             return json.dumps({"오류": "비교하려면 문서가 둘 이상 필요함"}, ensure_ascii=False)
 

@@ -150,6 +150,30 @@ def test_비교_대상이_하나면_거부한다() -> None:
     assert retriever.calls == []
 
 
+def test_비교할_문서를_안_주면_색인된_문서를_전부_비교한다() -> None:
+    """사용자가 "두 제품"처럼 이름을 대지 않으면 모델이 documents를 채울 수 없다.
+    필수로 두었더니 모델이 compare_spec을 포기하고 search_manual로 가서 근거가
+    한 문서에만 쏠렸다(#48, 실측 2026-09-14에 3회 재현)."""
+    box, retriever = _toolbox()
+
+    result = json.loads(box.call("compare_spec", {"field": "정격 전류"}))
+
+    assert [call[1] for call in retriever.calls] == [["ls-m100-v1"], ["ls-g100-v1"]]
+    assert set(result["문서별 근거"]) == {"ls-m100-v1", "ls-g100-v1"}
+
+
+def test_documents는_필수가_아니다() -> None:
+    """스키마가 필수라고 적혀 있으면 모델이 채울 값이 없을 때 도구 자체를 포기한다."""
+    box, _ = _toolbox()
+
+    compare = next(
+        d["function"] for d in box.definitions() if d["function"]["name"] == "compare_spec"
+    )
+
+    assert compare["parameters"]["required"] == ["field"]
+    assert "비운다" in compare["parameters"]["properties"]["documents"]["description"]
+
+
 def test_일부_문서만_없으면_찾은_것과_못_찾은_것을_함께_준다() -> None:
     box, _ = _toolbox()
 
