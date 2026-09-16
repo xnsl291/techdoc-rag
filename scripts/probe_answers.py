@@ -66,11 +66,14 @@ QUESTIONS = [
 # 이유는 같은 Retriever를 공유하기 때문이다(DP-58). 검색 쪽을 고치면 양쪽이
 # 같이 움직이므로, 한쪽만 재면 다른 쪽이 나빠진 것을 놓친다.
 AGENT_QUESTIONS = [
-    ("비교", "G100과 M100의 주위 온도 조건을 비교해줘"),
+    # 묶음의 두 질문은 항목이 같아야 한다. 처음에는 한쪽을 주위 온도로 두었는데,
+    # 항목이 다르면 근거가 겹칠 수 없어 묶음별 근거 일치가 늘 "없음"으로 나왔다.
+    ("비교", "G100과 M100의 정격 전류를 비교해줘"),
     # 제품 이름을 대지 않고 물었다. 처음에는 "비교"라는 말이 없어서 못 알아채는
     # 줄 알았는데, 재보니 갈리는 것은 이름을 댔는지였다(#48). 이름이 없으면
     # compare_spec의 documents를 채울 수 없어 그 도구를 아예 못 부른다.
     ("비교", "두 제품 정격 전류가 어떻게 달라?"),
+    ("조건비교", "G100과 M100의 주위 온도 조건을 비교해줘"),
     ("문서지정", "G100의 정격 전류는?"),
     ("없는제품", "S9999 제품의 정격 출력은?"),
     ("목록", "어떤 매뉴얼을 갖고 있어?"),
@@ -238,6 +241,16 @@ def _summarize(records: list[dict]) -> None:
         page_sets = [set(item["pages"]) for item in items]
         shared = set.intersection(*page_sets) if all(page_sets) else set()
         print(f"  [{path}] {group}: {len(items)}개 질문, 공통 근거 {sorted(shared) or '없음'}")
+
+    # 비교 질문에서 진짜 신호는 근거가 몇 개 문서에서 나왔는가다. 한 문서에서만
+    # 나오면 비교가 성립하지 않는다. #48이 정확히 그 상태였다.
+    agent_records = [r for r in records if r["path"] == "agent"]
+    if agent_records:
+        print("\n에이전트 질문별 근거가 나온 문서 수")
+        for record in agent_records:
+            documents = sorted({page.split()[0] for page in record["pages"]})
+            print(f"  [{record['group']}] {record['question']}")
+            print(f"      문서 {len(documents)}개 {documents or '없음'}")
 
 
 def compare(left: str, right: str) -> int:
