@@ -67,7 +67,9 @@ QUESTIONS = [
 # 같이 움직이므로, 한쪽만 재면 다른 쪽이 나빠진 것을 놓친다.
 AGENT_QUESTIONS = [
     ("비교", "G100과 M100의 주위 온도 조건을 비교해줘"),
-    # "비교"라는 말을 쓰지 않았다. 비교 질문임을 모델이 알아채는지 본다.
+    # 제품 이름을 대지 않고 물었다. 처음에는 "비교"라는 말이 없어서 못 알아채는
+    # 줄 알았는데, 재보니 갈리는 것은 이름을 댔는지였다(#48). 이름이 없으면
+    # compare_spec의 documents를 채울 수 없어 그 도구를 아예 못 부른다.
     ("비교", "두 제품 정격 전류가 어떻게 달라?"),
     ("문서지정", "G100의 정격 전류는?"),
     ("없는제품", "S9999 제품의 정격 출력은?"),
@@ -189,7 +191,10 @@ def run(label: str) -> int:
         verdict = "NO_ANSWER" if answer.text.strip() == NO_ANSWER_TEXT else "ANSWERED"
         if answer.stopped_at_limit:
             verdict += "_AT_LIMIT"
-        tools = answer.used_tools
+        # 도구 이름만 남기면 왜 그렇게 답했는지 되짚을 때 부족하다. #48을 찾을 때
+        # 인자를 보려고 같은 질문을 따로 돌려야 했다. 어느 문서로 좁혀 검색했는지가
+        # 인자에만 있다.
+        calls = [{"tool": step.tool, "arguments": step.arguments} for step in answer.steps]
         pages = AgentService.evidence_pages(answer.steps)
         records.append(
             {
@@ -199,12 +204,14 @@ def run(label: str) -> int:
                 "verdict": verdict,
                 "text": answer.text.strip(),
                 "pages": pages,
-                "tools": tools,
+                "calls": calls,
                 "seconds": round(elapsed, 2),
             }
         )
         print(f"  [{group}] {question}")
-        print(f"      {verdict} / {elapsed:.1f}s / 도구 {tools}")
+        print(f"      {verdict} / {elapsed:.1f}s")
+        for call in calls:
+            print(f"        {call['tool']}({json.dumps(call['arguments'], ensure_ascii=False)})")
         print(f"      근거 {pages[:4]}")
         print(f"      {answer.text.strip()[:110]}")
 
@@ -270,8 +277,19 @@ def compare(left: str, right: str) -> int:
         old_pages = old.get("pages", old.get("used_pages", []))
         if old_pages != new["pages"]:
             marks.append(f"근거 {old_pages}에서 {new['pages']}로")
-        if old.get("tools") != new.get("tools"):
-            marks.append(f"도구 {old.get('tools')}에서 {new.get('tools')}로")
+        # 옛 파일은 도구 이름만 담은 tools였다. 없어진 키를 변화로 읽지 않게 한다.
+        def calls_of(record: dict) -> list:
+            if "calls" in record:
+                return record["calls"]
+            return [{"tool": name, "arguments": None} for name in record.get("tools", [])]
+
+        old_calls, new_calls = calls_of(old), calls_of(new)
+        if [c["tool"] for c in old_calls] != [c["tool"] for c in new_calls]:
+            marks.append(
+                f"도구 {[c['tool'] for c in old_calls]}에서 {[c['tool'] for c in new_calls]}로"
+            )
+        elif old_calls != new_calls and all(c["arguments"] is not None for c in old_calls):
+            marks.append("도구 인자 바뀜")
         if old["text"] != new["text"]:
             marks.append("답변 문구 바뀜")
         print(f"[{new['path']}/{new['group']}] {new['question']}")
