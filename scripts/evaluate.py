@@ -59,6 +59,14 @@ class Question:
     note: str
 
 
+def _shown(path: Path) -> str:
+    """저장소 안이면 짧게, 밖이면 그대로. relative_to는 밖이면 ValueError를 낸다."""
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def parse_evidence(text: str) -> list[tuple[str, int, int]]:
     """`ls-m100-v1 p.248-250; ls-g100-v1 p.369-370`을 나눈다."""
     spans = []
@@ -238,11 +246,12 @@ def read_judge(path: Path) -> dict:
     return {"판정됨": judged, "맞음": correct}
 
 
-def run(label: str) -> int:
+def run(label: str, questions_path: Path) -> int:
     # 평가셋을 먼저 읽고 검사한다. 40문항을 다 돌린 뒤에 오타를 알면 20분을 버린다.
-    questions = load_questions(QUESTIONS_PATH, _page_counts())
+    questions = load_questions(questions_path, _page_counts())
     service, _agent, conditions = build_services()
-    print(f"평가셋: {QUESTIONS_PATH.relative_to(ROOT)} ({len(questions)}문항)")
+    conditions["questions"] = questions_path.name
+    print(f"평가셋: {_shown(questions_path)} ({len(questions)}문항)")
     print(f"조건: {json.dumps(conditions, ensure_ascii=False)}")
     print()
 
@@ -309,8 +318,8 @@ def run(label: str) -> int:
     write_judge_sheet(judge_path, records)
 
     print()
-    print(f"저장: {result_path.relative_to(ROOT)}")
-    print(f"사람 판정용: {judge_path.relative_to(ROOT)}")
+    print(f"저장: {_shown(result_path)}")
+    print(f"사람 판정용: {_shown(judge_path)}")
     print("  judge 칸에 O 또는 X를 적은 뒤 --apply-judge로 다시 집계함")
     return 0
 
@@ -325,7 +334,7 @@ def apply_judge(label: str) -> int:
         json.dump(payload, file, ensure_ascii=False, indent=2)
     print_summary(payload["summary"], judged)
     print()
-    print(f"갱신: {result_path.relative_to(ROOT)}")
+    print(f"갱신: {_shown(result_path)}")
     return 0
 
 
@@ -393,6 +402,11 @@ def main() -> int:
     parser.add_argument("--label", help="이번 실행 결과를 저장할 이름")
     parser.add_argument("--apply-judge", action="store_true", help="판정 표를 읽어 다시 집계")
     parser.add_argument("--compare", nargs=2, metavar=("이전", "이후"))
+    # DP-32가 Dev와 Holdout을 나누라고 정해 둠. 같은 셋으로 튜닝하고 최종 보고까지
+    # 하면 그 셋에 과적합된다.
+    parser.add_argument(
+        "--questions", type=Path, default=QUESTIONS_PATH, help="평가셋 파일 경로"
+    )
     arguments = parser.parse_args()
 
     if arguments.compare:
@@ -405,7 +419,7 @@ def main() -> int:
     try:
         if arguments.check:
             page_counts = _page_counts()
-            questions = load_questions(QUESTIONS_PATH, page_counts)
+            questions = load_questions(arguments.questions, page_counts)
             answerable = sum(q.answerable for q in questions)
             print(
                 f"이상 없음. {len(questions)}문항 "
@@ -416,7 +430,7 @@ def main() -> int:
             return 0
         if arguments.apply_judge:
             return apply_judge(arguments.label)
-        return run(arguments.label)
+        return run(arguments.label, arguments.questions)
     except (ValueError, FileNotFoundError) as error:
         print(f"\n{error}", file=sys.stderr)
         return 1
