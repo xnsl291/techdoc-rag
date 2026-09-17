@@ -80,7 +80,7 @@ AGENT_QUESTIONS = [
 ]
 
 
-def _build_services() -> tuple[ChatService, AgentService, dict]:
+def build_services() -> tuple[ChatService, AgentService, dict]:
     settings = load_settings()
     repository = SqliteDocumentRepository(settings.storage.metadata_database_path)
     repository.initialize()
@@ -156,7 +156,7 @@ def _build_services() -> tuple[ChatService, AgentService, dict]:
 
 
 def run(label: str) -> int:
-    service, agent, conditions = _build_services()
+    service, agent, conditions = build_services()
     print(f"조건: {json.dumps(conditions, ensure_ascii=False)}")
     records = []
 
