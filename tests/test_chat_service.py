@@ -114,6 +114,38 @@ def test_답과_인용이_나오고_사용된_근거만_표시된다() -> None:
     assert (citation.page_start, citation.page_end) == (42, 42)
 
 
+def test_예산에_밀린_근거도_인용에_남고_구분된다() -> None:
+    """검색은 됐는데 예산에서 잘린 것을 버리면, 검색이 못 찾은 것과 같아 보인다.
+    그러면 고칠 곳이 검색기인지 예산인지 알 수 없다(#53).
+
+    2026-09-22 실측에서 검색기가 찾은 평균 24.6개 중 9개만 프롬프트에 갔고,
+    정답을 찾아 놓고 여기서 밀린 문항이 24개 중 4건이었다."""
+    llm = FakeLlm("답 [1].")
+    service = ChatService(
+        retriever=FakeRetriever(
+            _found(
+                _retrieved("a", 0.9, "첫째근거" * 25),
+                _retrieved("b", 0.7, "밀려난근거ZEBRA" * 12),
+            )
+        ),
+        # 첫째만 들어가는 예산
+        context_builder=ContextBuilder(budget_chars=200),
+        llm_client=llm,
+        repository=FakeRepository(),
+        max_answer_tokens=256,
+    )
+
+    answer = service.ask("질문")
+
+    reached = {c.chunk_id: c.reached_prompt for c in answer.citations}
+    assert reached == {"a": True, "b": False}
+    # 프롬프트에 없던 것을 모델이 인용했을 리 없다
+    dropped = next(c for c in answer.citations if not c.reached_prompt)
+    assert dropped.is_used_in_answer is False
+    assert dropped.display_name == "M100 사용설명서.pdf"  # 이름도 붙어야 화면에 보인다
+    assert "ZEBRA" not in llm.prompts[0]  # 실제로 프롬프트에 안 들어갔다
+
+
 def test_프롬프트에_근거와_질문이_들어간다() -> None:
     llm = FakeLlm("답 [1].")
     service = _service(FakeRetriever(_found(_retrieved("a", 0.9))), llm)
