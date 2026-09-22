@@ -80,7 +80,10 @@ AGENT_QUESTIONS = [
 ]
 
 
-def _build_services() -> tuple[ChatService, AgentService, dict]:
+def build_services() -> tuple[ChatService, AgentService, Retriever, dict]:
+    """조립 지점. Retriever를 함께 돌려주는 이유는 평가가 검색 단계를 따로 봐야 하기
+    때문이다. ChatService.ask는 답변만 주므로 검색기가 무엇을 찾았는지 알 수 없고,
+    근거 예산에서 잘린 것을 프롬프트에 못 들어간 것으로 구분할 수 없다(#53)."""
     settings = load_settings()
     repository = SqliteDocumentRepository(settings.storage.metadata_database_path)
     repository.initialize()
@@ -152,11 +155,11 @@ def _build_services() -> tuple[ChatService, AgentService, dict]:
         "prompt_version": PROMPT_VERSION,
         "agent_max_steps": settings.agent.max_steps,
     }
-    return service, agent, conditions
+    return service, agent, retriever, conditions
 
 
 def run(label: str) -> int:
-    service, agent, conditions = _build_services()
+    service, agent, _retriever, conditions = build_services()
     print(f"조건: {json.dumps(conditions, ensure_ascii=False)}")
     records = []
 
