@@ -40,6 +40,8 @@ class ApiError(Exception):
 class DisplayCitation:
     label: str  # "문서명 p.10~11"
     is_used_in_answer: bool
+    # 근거 예산을 통과했나. 옛 서버는 이 필드를 안 보내므로 기본값을 True로 둔다.
+    reached_prompt: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +65,9 @@ def to_display(response: dict) -> DisplayAnswer:
     try:
         citations = [
             DisplayCitation(
-                label=_page_label(citation), is_used_in_answer=citation["is_used_in_answer"]
+                label=_page_label(citation),
+                is_used_in_answer=citation["is_used_in_answer"],
+                reached_prompt=bool(citation.get("reached_prompt", True)),
             )
             for citation in response.get("citations") or []
         ]

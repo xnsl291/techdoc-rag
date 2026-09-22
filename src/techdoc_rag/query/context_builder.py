@@ -1,8 +1,13 @@
 """검색된 청크를 프롬프트용 근거 목록으로 조립한다 (#19의 조립 단계).
 
 번호를 붙여 나열하고, 문자 수 예산을 넘으면 관련도(점수)가 낮은 것부터
-통째로 뺀다. **청크를 중간에서 자르지 않는다** — 자르면 [번호]가 가리키는
+통째로 뺀다. **청크를 중간에서 자르지 않는다.** 자르면 [번호]가 가리키는
 내용과 Citation의 페이지 범위가 어긋난다.
+
+**무엇이 밀려났는지 돌려준다**(#53). 이 단계는 검색된 24.6개 중 9개를 고르는
+선정 작업인데, 무엇이 떨어졌는지 밖으로 안 내보내면 검색이 못 찾은 것과
+찾았는데 잘린 것이 같아 보인다. 2026-09-22 실측에서 정답을 찾아 놓고 여기서
+밀린 문항이 24개 중 4건이었다.
 
 예산 단위가 토큰이 아니라 문자인 것은 청킹과 같은 이유다(settings.yaml
 chunking 주석): 토큰을 세려면 토크나이저가 필요한데 임베딩·LLM 모델이
@@ -12,7 +17,7 @@ chunking 주석): 토큰을 세려면 토크나이저가 필요한데 임베딩�
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from techdoc_rag.domain.chunk import RetrievedChunk
 from techdoc_rag.domain.errors import ConfigurationError
@@ -30,6 +35,10 @@ class ContextSource:
 class BuiltContext:
     text: str
     sources: list[ContextSource]
+    # 예산에 밀려 프롬프트에 못 들어간 것. 검색기가 찾았는데 여기서 떨어지는 일이
+    # 실제로 있다(#53, 2026-09-22 실측: 평균 24.6개 중 9개만 통과). 돌려주지 않으면
+    # 검색이 못 찾은 것과 구분이 안 된다.
+    dropped: list[RetrievedChunk] = field(default_factory=list)
 
 
 class ContextBuilder:
@@ -47,19 +56,22 @@ class ContextBuilder:
         사람이 읽는 문서명이며, 없는 문서는 document_id를 그대로 쓴다.
         """
         sources: list[ContextSource] = []
+        dropped: list[RetrievedChunk] = []
         blocks: list[str] = []
         seen: set[str] = set()
         used_chars = 0
         for result in results:
             if result.chunk.chunk_id in seen:
-                continue
+                continue  # 중복은 밀려난 것이 아니라 같은 것이므로 dropped에 넣지 않는다
             seen.add(result.chunk.chunk_id)
             # 헤더를 고정 여유분으로 추정하지 않고 블록을 실제로 만들어 잰다(리뷰 #26).
             # 파일명이 길면 추정치로는 예산을 조용히 넘는다.
             block = _render_block(len(sources) + 1, result, display_names)
             entry_length = len(block) + len(_SEPARATOR)
             if used_chars + entry_length > self._budget_chars:
-                continue  # 자르지 않고 통째로 뺀다. 더 낮은 점수는 더 짧을 수 있어 계속 본다
+                # 자르지 않고 통째로 뺀다. 더 낮은 점수는 더 짧을 수 있어 계속 본다
+                dropped.append(result)
+                continue
             sources.append(ContextSource(number=len(sources) + 1, retrieved=result))
             blocks.append(block)
             used_chars += entry_length
@@ -71,7 +83,7 @@ class ContextBuilder:
                 f"근거 예산({self._budget_chars}자)이 청크 하나보다 작음. "
                 f"최소 청크 {min(len(r.chunk.text) for r in results)}자"
             )
-        return BuiltContext(text=_SEPARATOR.join(blocks), sources=sources)
+        return BuiltContext(text=_SEPARATOR.join(blocks), sources=sources, dropped=dropped)
 
 
 _SEPARATOR = "\n\n"

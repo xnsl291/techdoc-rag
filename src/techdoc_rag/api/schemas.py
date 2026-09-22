@@ -26,6 +26,8 @@ class CitationModel(BaseModel):
     page_end: int
     chunk_id: str
     is_used_in_answer: bool
+    # 근거 예산을 통과해 LLM 입력에 들어갔나. False면 검색은 됐으나 잘린 것이다(#53).
+    reached_prompt: bool
 
 
 class ChatResponse(BaseModel):
@@ -49,6 +51,7 @@ class ChatResponse(BaseModel):
                     page_end=citation.page_end,
                     chunk_id=citation.chunk_id,
                     is_used_in_answer=citation.is_used_in_answer,
+                    reached_prompt=citation.reached_prompt,
                 )
                 for citation in answer.citations
             ],

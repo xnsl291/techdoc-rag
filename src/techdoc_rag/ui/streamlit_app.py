@@ -99,15 +99,28 @@ def _render_answer(display: DisplayAnswer) -> None:
             for citation in display.citations:
                 st.markdown(f"- {citation.label}")
         return
+    # 근거는 세 단계를 거친다. 검색되고, 예산을 통과해 프롬프트에 가고, 답변이 쓴다.
+    # 단계마다 떨어져 나가므로 한 묶음으로 보이면 어디서 잃었는지 알 수 없다(#53).
     used = [c for c in display.citations if c.is_used_in_answer]
-    others = [c for c in display.citations if not c.is_used_in_answer]
+    reached_unused = [
+        c for c in display.citations if c.reached_prompt and not c.is_used_in_answer
+    ]
+    dropped = [c for c in display.citations if not c.reached_prompt]
     if used:
         st.markdown("**답변에 사용된 근거**")
         for citation in used:
             st.markdown(f"- 📌 {citation.label}")
-    if others:
-        with st.expander(f"검색됐지만 사용되지 않은 근거 {len(others)}건"):
-            for citation in others:
+    if reached_unused:
+        with st.expander(f"모델에 전달됐지만 답변이 쓰지 않은 근거 {len(reached_unused)}건"):
+            for citation in reached_unused:
+                st.markdown(f"- {citation.label}")
+    if dropped:
+        with st.expander(f"검색됐지만 근거 예산에 밀린 것 {len(dropped)}건"):
+            st.caption(
+                "모델이 보지 못한 근거입니다. 여기에 정답이 있으면 검색이 아니라 "
+                "근거 예산을 고쳐야 합니다."
+            )
+            for citation in dropped:
                 st.markdown(f"- {citation.label}")
 
 
