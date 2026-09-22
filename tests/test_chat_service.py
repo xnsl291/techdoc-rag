@@ -38,10 +38,15 @@ class FakeRetriever:
     def __init__(self, result: RetrievalResult) -> None:
         self._result = result
         self.fail = False
+        # 어떤 범위로 불렸는지 남긴다. #52 배선을 여기서 확인한다.
+        self.scopes: list[list[str] | None] = []
 
-    def retrieve(self, question: str) -> RetrievalResult:
+    def retrieve(
+        self, question: str, document_ids: list[str] | None = None
+    ) -> RetrievalResult:
         if self.fail:
             raise RetrievalError("저장소 접근 불가")
+        self.scopes.append(document_ids)
         return self._result
 
 
@@ -64,6 +69,9 @@ class FakeLlm:
 
 
 class FakeRepository:
+    def active_document_ids(self) -> list[str]:
+        return ["ls-m100-v1"]
+
     def get(self, document_id: str) -> Document | None:
         if document_id != "ls-m100-v1":
             return None
@@ -144,6 +152,27 @@ def test_예산에_밀린_근거도_인용에_남고_구분된다() -> None:
     assert dropped.is_used_in_answer is False
     assert dropped.display_name == "M100 사용설명서.pdf"  # 이름도 붙어야 화면에 보인다
     assert "ZEBRA" not in llm.prompts[0]  # 실제로 프롬프트에 안 들어갔다
+
+
+def test_질문에_제품명이_있으면_그_문서로_좁혀_검색한다() -> None:
+    """문서 6권이 서로 닮아서, 좁히지 않으면 정답 문서가 8~9위로 밀린다(#52).
+    범위 계산은 document_scope가 하고 여기서는 그 결과가 검색기까지 가는지 본다."""
+    retriever = FakeRetriever(_found(_retrieved("a", 0.9)))
+    service = _service(retriever, FakeLlm("답 [1]."))
+
+    service.ask("M100 정기 점검은 얼마마다 해야 하나요?")
+
+    assert retriever.scopes == [["ls-m100-v1"]]
+
+
+def test_제품명이_없으면_범위를_넘기지_않는다() -> None:
+    """빈 목록을 넘기면 검색 대상이 0건이 되어 답할 수 있는 질문도 못 답한다."""
+    retriever = FakeRetriever(_found(_retrieved("a", 0.9)))
+    service = _service(retriever, FakeLlm("답 [1]."))
+
+    service.ask("인버터 설치 시 주위 온도 조건은?")
+
+    assert retriever.scopes == [None]
 
 
 def test_프롬프트에_근거와_질문이_들어간다() -> None:
