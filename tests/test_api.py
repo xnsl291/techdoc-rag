@@ -100,8 +100,45 @@ def test_답변이_JSON_계약대로_나온다() -> None:
             "page_end": 43,
             "chunk_id": "ls-m100-v1:0007",
             "is_used_in_answer": True,
+            "reached_prompt": True,
         }
     ]
+
+
+def test_예산에_밀린_근거는_reached_prompt가_False로_나간다() -> None:
+    """화면과 평가가 "검색이 못 찾은 것"과 "찾았는데 잘린 것"을 구분하려면
+    이 플래그가 그대로 나가야 한다(#53). 항상 True로 보내면 구분이 사라진다."""
+    answer = Answer(
+        text="답 [1].",
+        citations=[
+            Citation(
+                document_id="ls-m100-v1",
+                document_version=1,
+                display_name="M100 사용설명서.pdf",
+                page_start=42,
+                page_end=43,
+                chunk_id="ls-m100-v1:0007",
+                is_used_in_answer=True,
+                reached_prompt=True,
+            ),
+            Citation(
+                document_id="ls-m100-v1",
+                document_version=1,
+                display_name="M100 사용설명서.pdf",
+                page_start=90,
+                page_end=91,
+                chunk_id="ls-m100-v1:0031",
+                is_used_in_answer=False,
+                reached_prompt=False,
+            ),
+        ],
+    )
+    client = _client(FakeChatService(answer=answer))
+
+    body = client.post("/chat", json={"question": "질문"}).json()
+
+    flags = {c["chunk_id"]: c["reached_prompt"] for c in body["citations"]}
+    assert flags == {"ls-m100-v1:0007": True, "ls-m100-v1:0031": False}
 
 
 def test_No_answer는_오류가_아니라_200이다() -> None:

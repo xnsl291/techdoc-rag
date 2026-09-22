@@ -266,7 +266,7 @@ def read_judge(path: Path) -> dict:
 def run(label: str, questions_path: Path) -> int:
     # 평가셋을 먼저 읽고 검사한다. 40문항을 다 돌린 뒤에 오타를 알면 20분을 버린다.
     questions = load_questions(questions_path, _page_counts())
-    service, _agent, retriever, conditions = build_services()
+    service, _agent, _retriever, conditions = build_services()
     conditions["questions"] = questions_path.name
     print(f"평가셋: {_shown(questions_path)} ({len(questions)}문항)")
     print(f"조건: {json.dumps(conditions, ensure_ascii=False)}")
@@ -274,21 +274,20 @@ def run(label: str, questions_path: Path) -> int:
 
     records = []
     for question in questions:
-        # 검색기를 따로 한 번 부른다. ChatService.ask는 답변만 주므로 검색기가 무엇을
-        # 찾았는지 알 수 없고, 근거 예산에서 잘린 것과 검색이 못 찾은 것을 구분할 수
-        # 없다(#53). 같은 질의를 두 번 검색하는 비용(질문당 약 90ms)은 평가 스크립트에서만
-        # 생기고 운영 경로가 아니다. 파이프라인을 단계별로 쪼개면 이 중복은 없어진다.
-        retrieved = retriever.retrieve(question.question)
-
         started = time.perf_counter()
         answer = service.ask(question.question)
         elapsed = time.perf_counter() - started
 
+        # citations가 검색된 것을 전부 담고 reached_prompt로 구분한다(#53).
+        # 그래서 검색기를 따로 부르지 않아도 세 단계를 다 본다.
         found_by_retriever = [
-            (item.chunk.document_id, item.chunk.page_start, item.chunk.page_end)
-            for item in retrieved.chunks
+            (c.document_id, c.page_start, c.page_end) for c in answer.citations
         ]
-        reached_prompt = [(c.document_id, c.page_start, c.page_end) for c in answer.citations]
+        reached_prompt = [
+            (c.document_id, c.page_start, c.page_end)
+            for c in answer.citations
+            if c.reached_prompt
+        ]
         used = [
             (c.document_id, c.page_start, c.page_end)
             for c in answer.citations
@@ -317,8 +316,8 @@ def run(label: str, questions_path: Path) -> int:
                 "retrieval_hit": retrieval_hit,
                 "prompt_hit": prompt_hit,
                 "citation_hit": citation_hit,
-                "retrieved_count": len(retrieved.chunks),
-                "prompt_count": len(answer.citations),
+                "retrieved_count": len(answer.citations),
+                "prompt_count": len(reached_prompt),
                 "retrieved_pages": [f"{d} p.{s}-{e}" for d, s, e in found_by_retriever],
                 "searched_pages": [f"{d} p.{s}-{e}" for d, s, e in reached_prompt],
                 "used_pages": [f"{d} p.{s}-{e}" for d, s, e in used],

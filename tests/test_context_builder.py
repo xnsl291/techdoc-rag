@@ -60,6 +60,21 @@ def test_예산을_넘으면_낮은_점수부터_통째로_빠진다() -> None:
 
     ids = [s.retrieved.chunk.chunk_id for s in built.sources]
     assert ids == ["a", "c"]
+    # 밀려난 것을 돌려줘야 검색이 못 찾은 것과 찾았는데 잘린 것을 구분한다(#53)
+    assert [r.chunk.chunk_id for r in built.dropped] == ["b"]
+
+
+def test_중복_청크는_밀려난_것으로_세지_않는다() -> None:
+    """같은 chunk_id가 두 번 오는 것은 예산에 밀린 것이 아니라 같은 것이다.
+    이걸 dropped에 넣으면 "검색은 됐는데 잘렸다"는 수치가 부풀려진다."""
+    builder = ContextBuilder(budget_chars=1000)
+
+    built = builder.build(
+        [_retrieved("a", 0.9, "가" * 50), _retrieved("a", 0.8, "가" * 50)], NAMES
+    )
+
+    assert [s.retrieved.chunk.chunk_id for s in built.sources] == ["a"]
+    assert built.dropped == []
     assert "나" not in built.text  # 잘려서라도 들어가면 안 된다
 
 

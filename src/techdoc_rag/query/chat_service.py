@@ -93,19 +93,27 @@ class ChatService:
         text = "".join(self._llm_client.generate(prompt, max_tokens=self._max_answer_tokens))
 
         cited = self._cited_numbers(text, context)
-        citations = [
-            Citation(
-                document_id=source.retrieved.chunk.document_id,
-                document_version=source.retrieved.chunk.document_version,
-                display_name=display_names.get(
-                    source.retrieved.chunk.document_id, source.retrieved.chunk.document_id
-                ),
-                page_start=source.retrieved.chunk.page_start,
-                page_end=source.retrieved.chunk.page_end,
-                chunk_id=source.retrieved.chunk.chunk_id,
-                is_used_in_answer=source.number in cited,
+
+        def to_citation(chunk, used: bool, reached: bool) -> Citation:
+            return Citation(
+                document_id=chunk.document_id,
+                document_version=chunk.document_version,
+                display_name=display_names.get(chunk.document_id, chunk.document_id),
+                page_start=chunk.page_start,
+                page_end=chunk.page_end,
+                chunk_id=chunk.chunk_id,
+                is_used_in_answer=used,
+                reached_prompt=reached,
             )
+
+        citations = [
+            to_citation(source.retrieved.chunk, source.number in cited, True)
             for source in context.sources
+        ]
+        # 예산에 밀린 것도 담는다. 검색은 됐다는 사실이 남아야 고칠 곳을 안다(#53).
+        # 프롬프트에 없었으므로 모델이 인용했을 리 없다.
+        citations += [
+            to_citation(result.chunk, False, False) for result in context.dropped
         ]
         if not cited:
             # 모델이 답을 지어냈거나 표기 지시를 무시한 것 — 근거 사용의 증거가 없다.

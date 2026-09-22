@@ -12,8 +12,21 @@ class Citation:
 
     이 계약은 첫 구현부터 유지한다. 나중에 끼워 넣으려면 파이프라인 전 구간을 손봐야 한다.
 
-    is_used_in_answer는 검색된 근거와 실제로 답변에 반영된 근거를 구분한다.
-    Top-K로 가져온 것을 전부 근거로 표시하면 Traceability가 의미를 잃는다.
+    근거 하나는 세 단계를 거친다. 검색기가 찾고, 근거 예산 안에 들어 프롬프트에
+    가고, 답변이 인용한다. **단계마다 떨어져 나간다.** 2026-09-22 실측에서 검색기가
+    찾은 평균 24.6개 중 9개만 프롬프트에 갔고, 정답을 찾아 놓고 예산에서 밀린
+    문항이 24개 중 4건이었다(#53).
+
+    그래서 검색된 것을 전부 담되 어디까지 갔는지를 두 플래그로 구분한다.
+
+    - reached_prompt: 근거 예산을 통과해 LLM 입력에 들어갔나
+    - is_used_in_answer: 답변이 [번호]로 인용했나 (DP-56)
+
+    reached_prompt가 False면 is_used_in_answer는 항상 False다. 프롬프트에 없던
+    것을 모델이 인용할 수 없다.
+
+    이 구분이 없으면 "검색이 못 찾은 것"과 "찾았는데 잘린 것"이 같아 보인다.
+    고칠 곳이 검색기인지 예산인지 알 수 없게 된다.
     """
 
     document_id: str
@@ -23,6 +36,7 @@ class Citation:
     page_end: int
     chunk_id: str
     is_used_in_answer: bool
+    reached_prompt: bool = True
 
 
 class NoAnswerReason(StrEnum):
