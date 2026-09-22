@@ -24,6 +24,7 @@ from techdoc_rag.domain.answer import Answer, Citation, NoAnswerReason
 from techdoc_rag.domain.chunk import RetrievedChunk
 from techdoc_rag.domain.ports import DocumentRepository, LlmClient
 from techdoc_rag.query.context_builder import BuiltContext, ContextBuilder
+from techdoc_rag.query.document_scope import aliases_by_document, scope_from_question
 from techdoc_rag.query.retriever import Retriever
 
 # 근거에 없는 내용을 답하지 않는 것과 [번호] 표기가 계약의 전부다.
@@ -76,7 +77,12 @@ class ChatService:
         self._max_answer_tokens = max_answer_tokens
 
     def ask(self, question: str) -> Answer:
-        retrieval = self._retriever.retrieve(question)
+        # 질문에 제품명이 있으면 그 문서로만 찾는다. 없으면 scope가 None이고
+        # 전체를 본다(#52). 이름 목록은 요청마다 다시 읽는다 — 색인이 끝나
+        # 문서가 늘어도 재시작 없이 반영되어야 하고, SQLite 읽기는 한 요청에서
+        # 차지하는 비중이 0.01%다(DP-54).
+        scope = scope_from_question(question, aliases_by_document(self._repository))
+        retrieval = self._retriever.retrieve(question, document_ids=scope)
         if not retrieval.chunks:
             reason = (
                 NoAnswerReason.LOW_RELEVANCE
