@@ -172,6 +172,38 @@ def overlaps(span: tuple[str, int, int], document: str, start: int, end: int) ->
     return span[0] == document and span[1] <= end and start <= span[2]
 
 
+# 모델이 "근거에 없다"고 말할 때 쓰는 표현들. 2026-09-22 평가 30문항의 답변
+# 원문에서 실제로 나온 것만 모았다. 지어낸 목록이 아니다.
+# 네 개뿐인 이유: 처음에 일곱 개를 넣었는데 저장된 실행 결과 전부를 훑어 보니
+# "답변할 수 없", "답할 수 없", "정보가 없습니다"는 **단독으로 걸린 답이 한 건도
+# 없었다.** 항상 다른 표현이 같이 잡았다. 시험할 수 없는 항목을 남기면 변형
+# 확인이 공회전하므로 뺐다. 아래 넷은 각각 단독으로 걸린 실제 답이 있다.
+_REFUSAL_MARKS = (
+    "확인할 수 없",
+    "포함되어 있지 않",
+    "명시되어 있지 않",
+    "나와 있지 않",
+)
+
+
+def hedged(record: dict) -> bool:
+    """답한 것으로 분류됐는데 본문에 거절 표현이 섞인 경우.
+
+    이걸 자동으로 "거절"로 뒤집지 않는다. 같은 형태가 진짜 답변에도 나오기
+    때문이다. 2026-09-22 실측에서 네 건이 같은 문장으로 시작했다.
+
+        q020 "몇 퍼센트인지 명시되어 있지 않습니다" -> 뒤에서 "정격 전류의 200%"를 줌 (답변)
+        q014 "구체적인 값이 명시되어 있지 않습니다" -> 뒤에서 PRT-87 동작을 설명 (답변)
+        q018 "구체적인 시간 조건이 포함되어 있지 않습니다" -> 끝까지 값을 안 줌 (거절)
+        q025 "명시적인 정보가 없습니다" -> 관련 사양만 나열 (거절)
+
+    가르려면 "요청한 값을 결국 줬는가"를 봐야 하는데 문자열로는 못 한다.
+    자동 판정을 넣으면 앞의 두 건이 거절로 뒤집혀 오거절이 실제보다 부풀려진다.
+    그래서 세지만 않고, 사람 판정표로 넘겨 표시한다(#50).
+    """
+    return record["answered"] and any(mark in record["text"] for mark in _REFUSAL_MARKS)
+
+
 def score(records: list[dict]) -> dict:
     answerable = [r for r in records if r["answerable"]]
     refusable = [r for r in records if not r["answerable"]]
@@ -186,6 +218,9 @@ def score(records: list[dict]) -> dict:
         "근거적중": sum(r["citation_hit"] for r in answerable),
         "거절정확": sum(not r["answered"] for r in refusable),
         "오거절": sum(not r["answered"] for r in answerable),
+        # 위 두 줄의 신뢰 구간이다. 이 수가 클수록 거절 관련 수치를 그대로
+        # 믿으면 안 된다(#50).
+        "거절문구섞임": sum(hedged(r) for r in records),
         "응답시간_중앙값": round(statistics.median(seconds), 2) if seconds else 0.0,
         "응답시간_최대": round(max(seconds), 2) if seconds else 0.0,
     }
@@ -209,6 +244,12 @@ def print_summary(summary: dict, judged: dict | None = None) -> None:
     print(f"  근거 적중     {_ratio(summary['근거적중'], summary['답변가능'])}  (답변이 인용했나)")
     print(f"  거절 정확     {_ratio(summary['거절정확'], summary['답변불가'])}")
     print(f"  오거절        {_ratio(summary['오거절'], summary['답변가능'])}")
+    mixed = summary.get("거절문구섞임", 0)
+    if mixed:
+        print(
+            f"  └ 이 중 {mixed}건은 답한 것으로 분류됐으나 본문에 거절 표현이 섞여 있음.\n"
+            "    자동으로 못 가르므로 위 두 줄을 그대로 믿지 말고 판정 표에서 확인할 것(#50)"
+        )
     if judged:
         print(f"  답변 일치     {_ratio(judged['맞음'], judged['판정됨'])}  (사람 판정)")
     else:
@@ -224,17 +265,21 @@ def write_judge_sheet(path: Path, records: list[dict]) -> None:
 
     judge 칸에 O 또는 X만 적으면 --apply-judge가 집계한다. 답변가능 문항만 넣는다.
     거절해야 할 문항은 위 지표에서 이미 자동으로 센다.
+
+    `거절표현섞임` 열이 O인 줄부터 본다. 그 줄들은 자동 분류를 믿을 수 없는
+    것이고, 사람이 "요청한 값을 결국 줬는지"를 읽어야 갈린다(#50).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(
-            ["id", "question", "정답위치", "검색됨", "프롬프트도달",
+            ["id", "question", "정답위치", "검색됨", "프롬프트도달", "거절표현섞임",
              "시스템이_쓴_근거", "답변", "judge", "메모"]
         )
-        for record in records:
-            if not record["answerable"]:
-                continue
+        # 자동 분류를 믿을 수 없는 줄을 위로 올린다. 판정하는 사람이 처음 보는
+        # 몇 줄에서 가장 애매한 것을 만나야 한다.
+        answerable = [r for r in records if r["answerable"]]
+        for record in sorted(answerable, key=lambda r: not hedged(r)):
             writer.writerow(
                 [
                     record["id"],
@@ -242,6 +287,7 @@ def write_judge_sheet(path: Path, records: list[dict]) -> None:
                     "; ".join(record["expected"]),
                     "O" if record["retrieval_hit"] else "X",
                     "O" if record["prompt_hit"] else "X",
+                    "O" if hedged(record) else "",
                     "; ".join(record["used_pages"]) or "(없음)",
                     " ".join(record["text"].split()),
                     "",
@@ -399,7 +445,10 @@ def compare(left: str, right: str) -> int:
 
     print()
     print(f"{'지표':16} {left:>14} {right:>14}")
-    for key in ("검색적중", "프롬프트도달", "근거적중", "거절정확", "오거절", "응답시간_중앙값"):
+    for key in (
+        "검색적중", "프롬프트도달", "근거적중",
+        "거절정확", "오거절", "거절문구섞임", "응답시간_중앙값",
+    ):
         was = before["summary"].get(key)
         print(f"{key:16} {('측정안함' if was is None else was):>14} "
               f"{after['summary'].get(key, '측정안함'):>14}")
