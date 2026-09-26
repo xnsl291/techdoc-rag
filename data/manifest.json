@@ -14,10 +14,22 @@
     "file_size_bytes": 16976068,
     "downloaded_on": "2026-09-17",
     "source_page": "https://ssq.ls-electric.com/kr/ko/dlcenter",
-    "model_name_from_content": null,
-    "page_count": null,
-    "pages_without_text_layer": null,
-    "table_count": null
+    "model_name_from_content": "LSLV-G100",
+    "page_count": 415,
+    "pages_without_text_layer": 18,
+    "table_count": null,
+    "text_layer_ratio": 0.957,
+    "total_character_count": 325755,
+    "keyword_page_counts": {
+      "트립": 91,
+      "과전류": 14,
+      "과전압": 13,
+      "정격": 64,
+      "파라미터": 94,
+      "고장": 41,
+      "점검": 13,
+      "경보": 29
+    }
   },
   {
     "document_id": "ls-29166",
@@ -34,10 +46,22 @@
     "file_size_bytes": 16580629,
     "downloaded_on": "2026-09-17",
     "source_page": "https://ssq.ls-electric.com/kr/ko/dlcenter",
-    "model_name_from_content": null,
-    "page_count": null,
-    "pages_without_text_layer": null,
-    "table_count": null
+    "model_name_from_content": "LSLV-H100",
+    "page_count": 586,
+    "pages_without_text_layer": 19,
+    "table_count": null,
+    "text_layer_ratio": 0.968,
+    "total_character_count": 518204,
+    "keyword_page_counts": {
+      "트립": 97,
+      "과전류": 14,
+      "과전압": 12,
+      "정격": 70,
+      "파라미터": 136,
+      "고장": 52,
+      "점검": 14,
+      "경보": 30
+    }
   },
   {
     "document_id": "ls-1827",
@@ -54,10 +78,22 @@
     "file_size_bytes": 10509870,
     "downloaded_on": "2026-09-17",
     "source_page": "https://ssq.ls-electric.com/kr/ko/dlcenter",
-    "model_name_from_content": null,
-    "page_count": null,
-    "pages_without_text_layer": null,
-    "table_count": null
+    "model_name_from_content": "LSLV-M100",
+    "page_count": 270,
+    "pages_without_text_layer": 9,
+    "table_count": null,
+    "text_layer_ratio": 0.967,
+    "total_character_count": 209983,
+    "keyword_page_counts": {
+      "트립": 42,
+      "과전류": 5,
+      "과전압": 5,
+      "정격": 45,
+      "파라미터": 47,
+      "고장": 34,
+      "점검": 13,
+      "경보": 9
+    }
   },
   {
     "document_id": "ls-9095",
@@ -74,10 +110,22 @@
     "file_size_bytes": 21265527,
     "downloaded_on": "2026-09-17",
     "source_page": "https://ssq.ls-electric.com/kr/ko/dlcenter",
-    "model_name_from_content": null,
-    "page_count": null,
-    "pages_without_text_layer": null,
-    "table_count": null
+    "model_name_from_content": "LSLV-S100",
+    "page_count": 509,
+    "pages_without_text_layer": 16,
+    "table_count": null,
+    "text_layer_ratio": 0.969,
+    "total_character_count": 404330,
+    "keyword_page_counts": {
+      "트립": 109,
+      "과전류": 15,
+      "과전압": 13,
+      "정격": 77,
+      "파라미터": 132,
+      "고장": 47,
+      "점검": 18,
+      "경보": 19
+    }
   },
   {
     "document_id": "ls-14692",
@@ -94,10 +142,22 @@
     "file_size_bytes": 17917214,
     "downloaded_on": "2026-09-17",
     "source_page": "https://ssq.ls-electric.com/kr/ko/dlcenter",
-    "model_name_from_content": null,
-    "page_count": null,
-    "pages_without_text_layer": null,
-    "table_count": null
+    "model_name_from_content": "LSLV-S300",
+    "page_count": 855,
+    "pages_without_text_layer": 1,
+    "table_count": null,
+    "text_layer_ratio": 0.999,
+    "total_character_count": 702095,
+    "keyword_page_counts": {
+      "트립": 134,
+      "과전류": 20,
+      "과전압": 14,
+      "정격": 75,
+      "파라미터": 215,
+      "고장": 9,
+      "점검": 16,
+      "경보": 51
+    }
   },
   {
     "document_id": "ls-1711",
@@ -114,9 +174,21 @@
     "file_size_bytes": 15546776,
     "downloaded_on": "2026-09-17",
     "source_page": "https://ssq.ls-electric.com/kr/ko/dlcenter",
-    "model_name_from_content": null,
-    "page_count": null,
-    "pages_without_text_layer": null,
-    "table_count": null
+    "model_name_from_content": "SV-iS7",
+    "page_count": 386,
+    "pages_without_text_layer": 2,
+    "table_count": null,
+    "text_layer_ratio": 0.995,
+    "total_character_count": 361417,
+    "keyword_page_counts": {
+      "트립": 52,
+      "과전류": 13,
+      "과전압": 7,
+      "정격": 57,
+      "파라미터": 90,
+      "고장": 60,
+      "점검": 18,
+      "경보": 16
+    }
   }
 ]
