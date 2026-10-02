@@ -93,7 +93,6 @@ class Settings:
     api: ApiSettings
     agent: AgentSettings
     storage: StorageSettings
-    prompt_version: str
 
 
 def _read_yaml(path: Path) -> dict:
@@ -204,5 +203,4 @@ def load_settings(settings_path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
             ),
             qdrant_read_alias=_require(storage_section, "qdrant_read_alias", "storage"),
         ),
-        prompt_version=raw.get("prompt", {}).get("version", "v1"),
     )
