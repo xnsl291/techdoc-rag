@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import csv
 import importlib.util
 import sys
 from pathlib import Path
@@ -121,3 +122,131 @@ def test_집계가_섞인_건수를_함께_낸다() -> None:
     summary = evaluate.score(records)
 
     assert summary["거절문구섞임"] == 1
+
+
+# --- 거울 방향: 인용 없이 답한 것 (#65) ---
+# 아래 둘은 2026-10-01 실제 질문 평가의 답변 원문이다.
+
+SILENT_ANSWER_R013 = (
+    "네, **22kW 모터에 SV220iV5 (정격 출력 22kW) 인버터를 사용하면 용량상으로는 "
+    "충분합니다.** 하지만 실제 운전 시에는 다음과 같은 기술적 사항을 반드시 "
+    "확인하셔야 합니다. 정격성: 인버터의 정격 출력과 모터의 정격 출력이 일치하므로 "
+    "이론상 최대 부하에서 운전 가능합니다."
+)
+REAL_REFUSAL_R036 = (
+    "제공된 근거 자료에는 버튼 세 개로 구성된 래더를 작성하는 구체적인 방법이나 "
+    "절차에 대한 내용이 없습니다. 따라서 이 질문에 답할 수 없습니다. "
+    "근거 자료에서 확인할 수 없습니다"
+)
+
+
+def test_거절로_분류됐는데_거절_표현이_없으면_표시한다() -> None:
+    """지어낸 답이 "거절함"이라는 안전해 보이는 꼬리표를 달고 지나가는 경우다.
+    r013은 색인에 없는 제품을 묻는데 다른 제품 사양으로 단정했고, 인용을 하나도
+    안 붙여서 NOT_GROUNDED가 됐다. 라벨이 답변 불가라 거절 성공으로 집계됐다."""
+    assert evaluate.answered_without_citation(_record(SILENT_ANSWER_R013, answered=False))
+
+
+def test_진짜_거절은_표시하지_않는다() -> None:
+    assert evaluate.answered_without_citation(_record(REAL_REFUSAL_R036, answered=False)) is False
+
+
+def test_답함으로_분류된_것은_이_지표에_안_들어간다() -> None:
+    """`hedged`가 세는 쪽이다. 둘이 겹치면 같은 건을 두 번 센다."""
+    assert evaluate.answered_without_citation(_record(SILENT_ANSWER_R013, answered=True)) is False
+
+
+def test_두_방향을_따로_센다() -> None:
+    records = [
+        {"id": "a", "answerable": True, "answered": True, "text": TRUE_ANSWER_Q020,
+         "retrieval_hit": True, "prompt_hit": True, "citation_hit": True, "seconds": 1.0},
+        {"id": "b", "answerable": False, "answered": False, "text": SILENT_ANSWER_R013,
+         "retrieval_hit": False, "prompt_hit": False, "citation_hit": False, "seconds": 1.0},
+        {"id": "c", "answerable": False, "answered": False, "text": REAL_REFUSAL_R036,
+         "retrieval_hit": False, "prompt_hit": False, "citation_hit": False, "seconds": 1.0},
+    ]
+
+    summary = evaluate.score(records)
+
+    assert summary["거절문구섞임"] == 1
+    assert summary["인용없이답함"] == 1
+    # 틀리는 방향이 반대라 합치면 안 된다
+    assert summary["거절정확"] == 2  # 자동 집계는 b를 성공으로 센다
+
+
+# --- 판정 표 (#65) ---
+
+
+def _read_sheet(path) -> list[dict]:
+    with path.open(encoding="utf-8-sig", newline="") as file:
+        return list(csv.DictReader(file))
+
+
+def _records_for_sheet() -> list[dict]:
+    return [
+        {"id": "a", "question": "정격 전류는?", "answerable": True, "answered": True,
+         "text": "정격은 5A입니다 [1].",
+         "expected": ["ls-m100-v1 p.42-42"], "retrieval_hit": True, "prompt_hit": True,
+         "citation_hit": True, "used_pages": ["ls-m100-v1 p.42-42"], "seconds": 1.0},
+        {"id": "b", "question": "22kW 인버터면 충분한가요", "answerable": False,
+         "answered": False, "text": SILENT_ANSWER_R013, "expected": [],
+         "retrieval_hit": False, "prompt_hit": False,
+         "citation_hit": False, "used_pages": [], "seconds": 1.0},
+    ]
+
+
+def test_판정표에_답변_불가_문항도_들어간다(tmp_path) -> None:
+    """전에는 답변 불가 문항을 건너뛰었다. 그래서 자동 집계가 틀렸을 때
+    사람이 볼 방법이 없었다(#65)."""
+    path = tmp_path / "judge.csv"
+
+    evaluate.write_judge_sheet(path, _records_for_sheet())
+
+    rows = _read_sheet(path)
+    labels = {r["id"]: r["라벨"] for r in rows}
+    assert labels == {"a": "답변가능", "b": "답변불가"}
+    asked = {r["id"]: r["판정할_것"] for r in rows}
+    assert asked["a"] == "답이 근거와 맞나"
+    assert asked["b"] == "거절했나"
+
+
+def test_자동판정이_의심스러운_줄이_맨_위로_온다(tmp_path) -> None:
+    path = tmp_path / "judge.csv"
+
+    evaluate.write_judge_sheet(path, _records_for_sheet())
+
+    rows = _read_sheet(path)
+    assert rows[0]["id"] == "b"
+    assert rows[0]["자동판정의심"] == "인용없이답함"
+
+
+def test_판정_집계를_라벨별로_나눈다(tmp_path) -> None:
+    """한 숫자로 합치면 답변 품질이 나빠진 것과 거절이 나빠진 것을 못 가린다."""
+    path = tmp_path / "judge.csv"
+    evaluate.write_judge_sheet(path, _records_for_sheet())
+    rows = _read_sheet(path)
+    fields = list(rows[0])
+    for row in rows:
+        row["judge"] = "O" if row["라벨"] == "답변가능" else "X"
+    with open(path, "w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    judged = evaluate.read_judge(path)
+
+    assert judged == {"판정됨": 1, "맞음": 1, "거절판정됨": 1, "거절맞음": 0}
+
+
+def test_라벨_열이_없는_옛_판정표는_전부_답변가능으로_센다(tmp_path) -> None:
+    """그때는 답변 가능 문항만 표에 넣었다. 그 파일이 남아 있어도 읽혀야 한다."""
+    path = tmp_path / "old_judge.csv"
+    with open(path, "w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(["id", "question", "judge"])
+        writer.writerow(["q001", "질문", "O"])
+        writer.writerow(["q002", "질문", "X"])
+
+    judged = evaluate.read_judge(path)
+
+    assert judged == {"판정됨": 2, "맞음": 1, "거절판정됨": 0, "거절맞음": 0}

@@ -204,6 +204,27 @@ def hedged(record: dict) -> bool:
     return record["answered"] and any(mark in record["text"] for mark in _REFUSAL_MARKS)
 
 
+def answered_without_citation(record: dict) -> bool:
+    """거절로 분류됐는데 본문에 거절 표현이 전혀 없는 경우. `hedged`의 거울이다.
+
+    근거 확인이 `[n]` 표기를 세는 방식이라, 모델이 **인용을 하나도 붙이지 않고**
+    자신 있게 답하면 NOT_GROUNDED가 되어 "거절함"으로 분류된다.
+
+    `hedged`보다 이쪽이 위험하다. 지어낸 답이 "거절함"이라는 안전해 보이는
+    꼬리표를 달고 지나간다. 2026-10-01 실측에서 r013이 그랬다.
+
+        r013 "네, 22kW 모터에 SV220iV5 인버터를 사용하면 용량상으로는 충분합니다"
+             SV220iV5는 색인된 6권에 없는 제품인데 다른 제품의 사양을 끌어다 단정했다.
+             라벨이 답변 불가인데 `거절정확`에 **성공으로** 집계됐다.
+
+    여기서도 자동으로 뒤집지 않는다. 거절 표현이 없다는 것이 답했다는 증거는
+    아니다. 건수만 세어 사람 판정표로 넘긴다(#65).
+    """
+    return not record["answered"] and not any(
+        mark in record["text"] for mark in _REFUSAL_MARKS
+    )
+
+
 def score(records: list[dict]) -> dict:
     answerable = [r for r in records if r["answerable"]]
     refusable = [r for r in records if not r["answerable"]]
@@ -218,9 +239,10 @@ def score(records: list[dict]) -> dict:
         "근거적중": sum(r["citation_hit"] for r in answerable),
         "거절정확": sum(not r["answered"] for r in refusable),
         "오거절": sum(not r["answered"] for r in answerable),
-        # 위 두 줄의 신뢰 구간이다. 이 수가 클수록 거절 관련 수치를 그대로
-        # 믿으면 안 된다(#50).
+        # 아래 둘이 위 두 줄의 신뢰 구간이다. 이 수가 클수록 거절 관련 수치를
+        # 그대로 믿으면 안 된다. 틀리는 방향이 서로 반대라 따로 센다(#50, #65).
         "거절문구섞임": sum(hedged(r) for r in records),
+        "인용없이답함": sum(answered_without_citation(r) for r in records),
         "응답시간_중앙값": round(statistics.median(seconds), 2) if seconds else 0.0,
         "응답시간_최대": round(max(seconds), 2) if seconds else 0.0,
     }
@@ -245,15 +267,26 @@ def print_summary(summary: dict, judged: dict | None = None) -> None:
     print(f"  거절 정확     {_ratio(summary['거절정확'], summary['답변불가'])}")
     print(f"  오거절        {_ratio(summary['오거절'], summary['답변가능'])}")
     mixed = summary.get("거절문구섞임", 0)
-    if mixed:
-        print(
-            f"  └ 이 중 {mixed}건은 답한 것으로 분류됐으나 본문에 거절 표현이 섞여 있음.\n"
-            "    자동으로 못 가르므로 위 두 줄을 그대로 믿지 말고 판정 표에서 확인할 것(#50)"
-        )
+    silent = summary.get("인용없이답함", 0)
+    if mixed or silent:
+        print("  └ 위 두 줄은 그대로 믿지 말 것. 자동 판정이 양방향으로 틀린다(#50, #65)")
+        if mixed:
+            print(f"      {mixed}건 답함으로 분류됐으나 본문에 거절 표현이 섞여 있음")
+        if silent:
+            print(f"      {silent}건 거절로 분류됐으나 본문에 거절 표현이 없음")
+        print("      판정 표에서 확인할 것")
     if judged:
-        print(f"  답변 일치     {_ratio(judged['맞음'], judged['판정됨'])}  (사람 판정)")
+        print(
+            f"  답변 일치     {_ratio(judged['맞음'], judged['판정됨'])}"
+            "  (사람 판정, 답변 가능 문항)"
+        )
+        print(
+            f"  거절 판정     {_ratio(judged['거절맞음'], judged['거절판정됨'])}"
+            "  (사람 판정, 답변 불가 문항)"
+        )
     else:
         print("  답변 일치     판정 전")
+        print("  거절 판정     판정 전")
     print(
         f"  응답시간      중앙값 {summary['응답시간_중앙값']}초"
         f" / 최대 {summary['응답시간_최대']}초"
@@ -263,31 +296,52 @@ def print_summary(summary: dict, judged: dict | None = None) -> None:
 def write_judge_sheet(path: Path, records: list[dict]) -> None:
     """답변이 근거와 맞는지 사람이 적을 표.
 
-    judge 칸에 O 또는 X만 적으면 --apply-judge가 집계한다. 답변가능 문항만 넣는다.
-    거절해야 할 문항은 위 지표에서 이미 자동으로 센다.
+    judge 칸에 O 또는 X만 적으면 --apply-judge가 집계한다. **답변 불가 문항도
+    넣는다.** 전에는 "거절해야 할 문항은 위 지표에서 이미 자동으로 센다"며
+    건너뛰었는데, 그 자동 집계가 양방향으로 틀린다는 것이 드러났다(#65).
+    사람이 볼 방법이 없으면 틀린 줄도 모른다.
 
-    `거절표현섞임` 열이 O인 줄부터 본다. 그 줄들은 자동 분류를 믿을 수 없는
-    것이고, 사람이 "요청한 값을 결국 줬는지"를 읽어야 갈린다(#50).
+    `judge` 칸의 뜻은 양쪽에서 같다. **시스템 출력이 올바른가.** 답변 가능
+    문항은 답이 근거와 맞는가이고, 답변 불가 문항은 거절했는가다. 묻는 것이
+    다르므로 집계는 `라벨` 열로 나눠서 한다. 한 숫자로 합치면 어느 쪽이
+    나빠졌는지 못 가린다.
+
+    `자동판정의심` 열이 찍힌 줄부터 본다. 그 줄은 자동 분류를 믿을 수 없다는
+    표시다. 두 종류가 있다.
+
+    - `거절표현섞임`: 답함으로 분류됐으나 본문에 거절 표현이 있다(#50)
+    - `인용없이답함`: 거절로 분류됐으나 본문에 거절 표현이 없다(#65)
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(
-            ["id", "question", "정답위치", "검색됨", "프롬프트도달", "거절표현섞임",
-             "시스템이_쓴_근거", "답변", "judge", "메모"]
+            ["id", "라벨", "question", "판정할_것", "정답위치", "검색됨", "프롬프트도달",
+             "자동판정의심", "시스템_분류", "시스템이_쓴_근거", "답변", "judge", "메모"]
         )
+
+        def suspect(record: dict) -> str:
+            if hedged(record):
+                return "거절표현섞임"
+            if answered_without_citation(record):
+                return "인용없이답함"
+            return ""
+
         # 자동 분류를 믿을 수 없는 줄을 위로 올린다. 판정하는 사람이 처음 보는
         # 몇 줄에서 가장 애매한 것을 만나야 한다.
-        answerable = [r for r in records if r["answerable"]]
-        for record in sorted(answerable, key=lambda r: not hedged(r)):
+        for record in sorted(records, key=lambda r: not suspect(r)):
+            answerable = record["answerable"]
             writer.writerow(
                 [
                     record["id"],
+                    "답변가능" if answerable else "답변불가",
                     record["question"],
-                    "; ".join(record["expected"]),
-                    "O" if record["retrieval_hit"] else "X",
-                    "O" if record["prompt_hit"] else "X",
-                    "O" if hedged(record) else "",
+                    "답이 근거와 맞나" if answerable else "거절했나",
+                    "; ".join(record["expected"]) or "(없음)",
+                    ("O" if record["retrieval_hit"] else "X") if answerable else "",
+                    ("O" if record["prompt_hit"] else "X") if answerable else "",
+                    suspect(record),
+                    "답함" if record["answered"] else "거절함",
                     "; ".join(record["used_pages"]) or "(없음)",
                     " ".join(record["text"].split()),
                     "",
@@ -297,16 +351,35 @@ def write_judge_sheet(path: Path, records: list[dict]) -> None:
 
 
 def read_judge(path: Path) -> dict:
+    """판정 표를 읽어 라벨별로 나눠 집계한다.
+
+    한 숫자로 합치지 않는 이유는 묻는 것이 다르기 때문이다. 답변 가능 문항은
+    "답이 근거와 맞나"이고 답변 불가 문항은 "거절했나"다. 합치면 어느 쪽이
+    나빠졌는지 못 가린다(#65).
+
+    `라벨` 열이 없는 옛 판정 표는 전부 답변 가능으로 센다. 그때는 답변 가능
+    문항만 표에 넣었기 때문이다.
+    """
     if not path.exists():
         raise FileNotFoundError(f"판정 표가 없음: {path}")
-    judged = correct = 0
+    judged = correct = refusal_judged = refusal_correct = 0
     with path.open(encoding="utf-8-sig", newline="") as file:
         for row in csv.DictReader(file):
             mark = (row.get("judge") or "").strip().upper()
-            if mark in {"O", "X"}:
+            if mark not in {"O", "X"}:
+                continue
+            if (row.get("라벨") or "답변가능").strip() == "답변불가":
+                refusal_judged += 1
+                refusal_correct += mark == "O"
+            else:
                 judged += 1
                 correct += mark == "O"
-    return {"판정됨": judged, "맞음": correct}
+    return {
+        "판정됨": judged,
+        "맞음": correct,
+        "거절판정됨": refusal_judged,
+        "거절맞음": refusal_correct,
+    }
 
 
 def run(label: str, questions_path: Path) -> int:
@@ -447,7 +520,7 @@ def compare(left: str, right: str) -> int:
     print(f"{'지표':16} {left:>14} {right:>14}")
     for key in (
         "검색적중", "프롬프트도달", "근거적중",
-        "거절정확", "오거절", "거절문구섞임", "응답시간_중앙값",
+        "거절정확", "오거절", "거절문구섞임", "인용없이답함", "응답시간_중앙값",
     ):
         was = before["summary"].get(key)
         print(f"{key:16} {('측정안함' if was is None else was):>14} "
