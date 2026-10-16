@@ -18,6 +18,7 @@ from techdoc_rag.domain.errors import (
     GenerationError,
     MetadataStoreError,
     RetrievalError,
+    UnknownDocumentError,
 )
 
 
@@ -26,9 +27,11 @@ class FakeChatService:
         self._answer = answer
         self._error = error
         self.questions: list[str] = []
+        self.scopes: list[list[str] | None] = []
 
-    def ask(self, question: str) -> Answer:
+    def ask(self, question: str, document_ids: list[str] | None = None) -> Answer:
         self.questions.append(question)
+        self.scopes.append(document_ids)
         if self._error is not None:
             raise self._error
         assert self._answer is not None
@@ -292,3 +295,47 @@ def test_에이전트_경로도_질문_길이_상한을_적용한다() -> None:
 
     assert response.status_code == 422
     assert agent.questions == []  # 상한을 넘으면 에이전트를 부르지 않는다
+
+
+# --- POST /chat 문서 범위 (#43) ---
+
+
+def test_문서_범위를_생략하면_None이_서비스로_간다() -> None:
+    """기존 요청의 동작이 그대로여야 한다. 생략은 전체 검색이다."""
+    service = FakeChatService(answer=_answered())
+    client = _client(service)
+
+    client.post("/chat", json={"question": "정격 전류는?"})
+
+    assert service.scopes == [None]
+
+
+def test_지정한_문서_범위가_서비스까지_그대로_간다() -> None:
+    service = FakeChatService(answer=_answered())
+    client = _client(service)
+
+    client.post("/chat", json={"question": "정격 전류는?", "document_ids": ["ls-g100-v1"]})
+
+    assert service.scopes == [["ls-g100-v1"]]
+
+
+def test_빈_문서_범위는_422다() -> None:
+    """"전부 검색"과 "아무것도 검색 안 함" 중 무엇인지 정할 수 없다."""
+    service = FakeChatService(answer=_answered())
+    client = _client(service)
+
+    response = client.post("/chat", json={"question": "질문", "document_ids": []})
+
+    assert response.status_code == 422
+    assert service.questions == []  # 서비스까지 가지 않는다
+
+
+def test_없는_문서를_지정하면_404다() -> None:
+    """503이나 No-answer(200)로 나가면 서버 문제나 "답이 없다"로 오해한다."""
+    service = FakeChatService(error=UnknownDocumentError(["ls-nope-v1"]))
+    client = _client(service)
+
+    response = client.post("/chat", json={"question": "질문", "document_ids": ["ls-nope-v1"]})
+
+    assert response.status_code == 404
+    assert "ls-nope-v1" in response.json()["detail"]

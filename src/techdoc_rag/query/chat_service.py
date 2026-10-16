@@ -22,6 +22,7 @@ import re
 
 from techdoc_rag.domain.answer import Answer, Citation, NoAnswerReason
 from techdoc_rag.domain.chunk import RetrievedChunk
+from techdoc_rag.domain.errors import UnknownDocumentError
 from techdoc_rag.domain.ports import DocumentRepository, LlmClient
 from techdoc_rag.query.context_builder import BuiltContext, ContextBuilder
 from techdoc_rag.query.document_scope import aliases_by_document, scope_from_question
@@ -82,12 +83,22 @@ class ChatService:
         self._repository = repository
         self._max_answer_tokens = max_answer_tokens
 
-    def ask(self, question: str) -> Answer:
-        # 질문에 제품명이 있으면 그 문서로만 찾는다. 없으면 scope가 None이고
-        # 전체를 본다(#52). 이름 목록은 요청마다 다시 읽는다 — 색인이 끝나
-        # 문서가 늘어도 재시작 없이 반영되어야 하고, SQLite 읽기는 한 요청에서
-        # 차지하는 비중이 0.01%다(DP-54).
-        scope = scope_from_question(question, aliases_by_document(self._repository))
+    def ask(self, question: str, document_ids: list[str] | None = None) -> Answer:
+        """질문에 답한다. `document_ids`를 주면 그 문서 안에서만 찾는다(#43).
+
+        **사용자가 지정한 범위가 자동 범위를 이긴다.** 지정이 있으면 질문에서
+        제품명을 찾는 자동 범위(#52)를 쓰지 않는다. 지정은 의도이고 자동 범위는
+        추측이라, 추측이 의도를 덮으면 안 된다. 교집합을 쓰면 둘이 다를 때 이유도
+        모른 채 0건이 되고, 합집합을 쓰면 좁힌 의미가 없어진다.
+        """
+        if document_ids is not None:
+            scope = self._checked_scope(document_ids)
+        else:
+            # 질문에 제품명이 있으면 그 문서로만 찾는다. 없으면 scope가 None이고
+            # 전체를 본다(#52). 이름 목록은 요청마다 다시 읽는다. 색인이 끝나
+            # 문서가 늘어도 재시작 없이 반영되어야 하고, SQLite 읽기는 한 요청에서
+            # 차지하는 비중이 0.01%다(DP-54).
+            scope = scope_from_question(question, aliases_by_document(self._repository))
         retrieval = self._retriever.retrieve(question, document_ids=scope)
         if not retrieval.chunks:
             reason = (
@@ -134,6 +145,22 @@ class ChatService:
                 text=text, citations=citations, no_answer_reason=NoAnswerReason.NOT_GROUNDED
             )
         return Answer(text=text, citations=citations)
+
+    def _checked_scope(self, document_ids: list[str]) -> list[str]:
+        """지정한 문서가 전부 활성인지 확인한다. 하나라도 아니면 예외.
+
+        `Retriever`는 활성 목록과 교집합을 내므로, 여기서 안 막으면 없는 ID가
+        조용히 빠진다. 전부 빠지면 검색 대상 0건이 되어 NO_RELEVANT_CHUNK로
+        끝나고, 사용자는 "매뉴얼에 답이 없다"고 오해한다. ID를 잘못 준 것과
+        답이 없는 것은 다른 일이다.
+
+        중복은 하나로 합친다. 같은 문서를 두 번 준 것을 오류로 볼 이유가 없다.
+        """
+        active = set(self._repository.active_document_ids())
+        unknown = [item for item in dict.fromkeys(document_ids) if item not in active]
+        if unknown:
+            raise UnknownDocumentError(unknown)
+        return list(dict.fromkeys(document_ids))
 
     def _display_names(self, chunks: list[RetrievedChunk]) -> dict[str, str]:
         names: dict[str, str] = {}

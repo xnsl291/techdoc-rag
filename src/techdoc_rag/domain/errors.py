@@ -42,3 +42,16 @@ class RetrievalError(TechdocRagError):
 
 class GenerationError(TechdocRagError):
     """LLM 호출 또는 응답 생성에 실패한 경우."""
+
+
+class UnknownDocumentError(TechdocRagError):
+    """질의 범위로 지정한 문서가 없거나 비활성인 경우(#43).
+
+    장애가 아니라 요청이 틀린 것이다. 조용히 걸러 내면 범위가 0건이 되어
+    "관련 내용을 찾지 못했습니다"로 끝나는데, 그러면 사용자는 매뉴얼에 답이
+    없다고 오해한다. 실제로는 문서 ID를 잘못 준 것이다.
+    """
+
+    def __init__(self, document_ids: list[str]) -> None:
+        self.document_ids = document_ids
+        super().__init__(f"없거나 비활성인 문서: {', '.join(document_ids)}")
