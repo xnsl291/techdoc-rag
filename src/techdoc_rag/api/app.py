@@ -25,6 +25,7 @@ from techdoc_rag.domain.errors import (
     GenerationError,
     MetadataStoreError,
     RetrievalError,
+    UnknownDocumentError,
 )
 from techdoc_rag.query.chat_service import ChatService
 
@@ -53,7 +54,11 @@ def create_app(
     def chat(request: ChatRequest) -> ChatResponse:
         check_length(request.question)
         try:
-            answer = chat_service.ask(request.question)
+            answer = chat_service.ask(request.question, document_ids=request.document_ids)
+        except UnknownDocumentError as error:
+            # 요청이 틀린 것이지 장애가 아니다. 503이나 No-answer로 내보내면
+            # 사용자는 서버 문제나 "답이 없다"로 오해한다(#43).
+            raise HTTPException(status_code=404, detail=str(error)) from error
         except (RetrievalError, GenerationError, MetadataStoreError) as error:
             # 장애는 No-answer가 아니라 503이다(D-005). LLM 일반 지식으로
             # 우회하지 않았다는 사실이 상태 코드로 드러난다. MetadataStoreError는
