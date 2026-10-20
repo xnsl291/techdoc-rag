@@ -11,7 +11,11 @@ llm:
   temperature: 0.0
   # Qwen3.5는 thinking이 기본 ON이고 지연을 배 단위로 바꾼다.
   thinking_enabled: false
-  runtime_context_tokens: 8192      # [미확정, 시작점]
+  # 2026-10-20 8192에서 올림(#57). 8192는 평가 66문항 중 3건(최대 8,884토큰)이 넘쳐
+  # 앞의 지시문이 잘렸다. RTX 4060 Laptop 실측으로 모델 메모리 3.4GB에서 3.6GB, 100% GPU
+  # 그대로, 짧은 질문 생성 0.5~0.6초로 차이가 없었다. 넘치면 클라이언트가 truncate=false로
+  # 보내 잘리지 않고 오류가 된다. [실측] 근거는 notes docs/decisions/2026-10-20-컨텍스트-한도.md
+  runtime_context_tokens: 16384
   generation_max_tokens: 512        # [미확정, 시작점] 허용 응답시간이 정해지면 역산한다
   # 동시 생성 수(DP-51). 1은 CPU 환경을 전제한 값이고 측정으로 확인하지 않았다.
   # GPU를 확보하거나 추론 서버를 분리하면 올린다.
