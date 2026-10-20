@@ -152,10 +152,26 @@ def build_services() -> tuple[ChatService, AgentService, Retriever, dict]:
         "similarity_threshold": settings.retrieval.similarity_threshold,
         "context_budget_chars": settings.retrieval.context_budget_chars,
         "generation_max_tokens": settings.llm.generation_max_tokens,
+        # 2026-10-20 추가(#57). 이 값만 바꿔도 66문항 중 47문항의 답 문장이 바뀌었다.
+        # 그 이전 결과 파일에는 이 키가 없고, 당시 값은 8192였다.
+        "runtime_context_tokens": settings.llm.runtime_context_tokens,
         "prompt_version": PROMPT_VERSION,
         "agent_max_steps": settings.agent.max_steps,
     }
     return service, agent, retriever, conditions
+
+
+def changed_conditions(before: dict, after: dict) -> dict:
+    """두 결과의 조건 중 다른 것. 한쪽에만 있는 키도 넣는다(없는 쪽은 None).
+
+    앞 결과의 키만 돌면 새로 기록하기 시작한 조건이 바뀌어도 "없음"으로 나온다.
+    """
+    keys = list(before) + [key for key in after if key not in before]
+    return {
+        key: (before.get(key), after.get(key))
+        for key in keys
+        if before.get(key) != after.get(key)
+    }
 
 
 def run(label: str) -> int:
@@ -262,11 +278,7 @@ def compare(left: str, right: str) -> int:
             return json.load(file)
 
     a, b = load(left), load(right)
-    changed = {
-        key: (a["conditions"][key], b["conditions"][key])
-        for key in a["conditions"]
-        if a["conditions"][key] != b["conditions"].get(key)
-    }
+    changed = changed_conditions(a["conditions"], b["conditions"])
     print(f"바뀐 조건: {json.dumps(changed, ensure_ascii=False) if changed else '없음'}\n")
 
     # 순서대로 짝짓지 않고 (경로, 질문)으로 찾는다. 질문을 더하거나 뺀 뒤에도
