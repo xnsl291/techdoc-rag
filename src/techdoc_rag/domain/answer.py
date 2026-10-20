@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -59,6 +60,7 @@ class Answer:
     LOW_RELEVANCE의 text는 확인 불가 안내문이고, NOT_GROUNDED의 text는
     근거 사용이 확인되지 않은 LLM 원문이다 — 평가에서 실패 유형을 분류할
     재료로 보존하는 것이며, 표시 계층은 이것을 답변처럼 노출하면 안 된다.
+    원문이라도 마크다운 링크의 주소는 지운 뒤다(strip_link_targets, #71).
     검색이나 생성이 실패한 경우는 여기로 오지 않고 예외로 처리한다.
     장애를 No-answer로 감추면 품질 문제와 장애를 구분할 수 없게 된다.
     """
@@ -70,3 +72,17 @@ class Answer:
     @property
     def is_answered(self) -> bool:
         return self.no_answer_reason is None
+
+
+# 매뉴얼은 파라미터 코드를 대괄호로 적는다("[CNF-40] 및 공통영역 주소 0x03E2").
+# 모델이 이것을 마크다운 링크의 앞부분으로 보고 "(https://www.google.com/...)"처럼
+# 근거에 없는 주소를 이어 쓴다. 화면은 답을 마크다운으로 그리므로 눌리는 링크가
+# 된다(#71). 프롬프트로 막으면 버전을 올리고 다시 평가해야 하고 4B가 지킨다는
+# 보장도 없어서, 나온 답에서 주소만 지운다. 글자는 대괄호째 남긴다.
+# 맨 주소(https://...)는 매뉴얼에 실제로 적힌 제조사 주소일 수 있어 건드리지 않는다.
+_MARKDOWN_LINK = re.compile(r"!?\[([^\]\n]*)\]\([^)\n]*\)")
+
+
+def strip_link_targets(text: str) -> str:
+    """`[글자](주소)`와 `![글자](주소)`를 `[글자]`로 바꾼다."""
+    return _MARKDOWN_LINK.sub(r"[\1]", text)

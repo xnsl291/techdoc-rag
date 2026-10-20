@@ -228,3 +228,11 @@ def test_도구_결과에서_근거_쪽을_모은다() -> None:
         "ls-g100-v1 p.248",
         "ls-m100-v1 p.172",
     ]
+
+
+def test_답에_붙은_링크_주소는_지운다() -> None:
+    llm = ScriptedLlm([ChatTurn(content="코드는 [CNF-40](url)입니다.", tool_calls=[])])
+
+    answer = _service(llm, FakeToolBox()).ask("초기화 코드는?")
+
+    assert answer.text == "코드는 [CNF-40]입니다."

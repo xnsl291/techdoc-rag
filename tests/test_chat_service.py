@@ -243,3 +243,14 @@ def test_생성_실패는_예외로_올라간다() -> None:
 
     with pytest.raises(GenerationError):
         service.ask("질문")
+
+
+def test_답에_붙은_링크_주소는_지우고_글자는_남긴다() -> None:
+    # 매뉴얼의 "[CNF-40]" 표기에 모델이 근거에 없는 주소를 이어 쓴 실제 사례(#71)
+    llm = FakeLlm("초기화 코드는 [CNF-40](https://www.google.com/search?q=CNF-40)입니다 [1].")
+    service = _service(FakeRetriever(_found(_retrieved("a", 0.9))), llm)
+
+    answer = service.ask("파라미터 초기화 코드는?")
+
+    assert answer.text == "초기화 코드는 [CNF-40]입니다 [1]."
+    assert answer.is_answered
