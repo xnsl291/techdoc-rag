@@ -245,12 +245,13 @@ def test_생성_실패는_예외로_올라간다() -> None:
         service.ask("질문")
 
 
-def test_답에_붙은_링크_주소는_지우고_글자는_남긴다() -> None:
-    # 매뉴얼의 "[CNF-40]" 표기에 모델이 근거에 없는 주소를 이어 쓴 실제 사례(#71)
-    llm = FakeLlm("초기화 코드는 [CNF-40](https://www.google.com/search?q=CNF-40)입니다 [1].")
-    service = _service(FakeRetriever(_found(_retrieved("a", 0.9))), llm)
+def test_서비스는_모델이_지어낸_링크를_그대로_돌려준다() -> None:
+    # 평가 스크립트는 서비스를 직접 부른다. 여기서 지우면 모델이 여전히 주소를
+    # 지어낸다는 사실을 평가에서 셀 수 없게 된다. 지우는 곳은 API 응답이다(#71).
+    raw = "초기화 코드는 [CNF-40](https://www.google.com/search?q=CNF-40)입니다 [1]."
+    service = _service(FakeRetriever(_found(_retrieved("a", 0.9))), FakeLlm(raw))
 
     answer = service.ask("파라미터 초기화 코드는?")
 
-    assert answer.text == "초기화 코드는 [CNF-40]입니다 [1]."
+    assert answer.text == raw
     assert answer.is_answered

@@ -24,7 +24,6 @@ import json
 from dataclasses import dataclass, field
 
 from techdoc_rag.agent.tools import ToolBox
-from techdoc_rag.domain.answer import strip_link_targets
 from techdoc_rag.domain.ports import ToolCallingClient
 
 SYSTEM_PROMPT = """너는 제품 매뉴얼을 찾아 답하는 도우미다.
@@ -98,9 +97,7 @@ class AgentService:
             if not turn.tool_calls:
                 # 도구를 안 부르면 답을 낸 것이다. 내용이 비어 있으면 모델이
                 # 아무 말도 못 한 것이므로 확인 불가로 끝낸다.
-                return AgentAnswer(
-                    text=strip_link_targets(turn.content.strip()) or NO_ANSWER_TEXT, steps=steps
-                )
+                return AgentAnswer(text=turn.content.strip() or NO_ANSWER_TEXT, steps=steps)
 
             messages.append(
                 {
@@ -128,9 +125,7 @@ class AgentService:
             messages=messages, tools=[], max_tokens=self._max_answer_tokens
         )
         return AgentAnswer(
-            text=strip_link_targets(final.content.strip()) or NO_ANSWER_TEXT,
-            steps=steps,
-            stopped_at_limit=True,
+            text=final.content.strip() or NO_ANSWER_TEXT, steps=steps, stopped_at_limit=True
         )
 
     @staticmethod

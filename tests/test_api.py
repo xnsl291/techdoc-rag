@@ -292,3 +292,26 @@ def test_에이전트_경로도_질문_길이_상한을_적용한다() -> None:
 
     assert response.status_code == 422
     assert agent.questions == []  # 상한을 넘으면 에이전트를 부르지 않는다
+
+
+def test_응답에서는_모델이_지어낸_링크_주소를_지운다() -> None:
+    """매뉴얼의 "[CNF-40]" 표기에 모델이 근거에 없는 주소를 이어 쓴 실제 사례(#71).
+    화면은 답을 마크다운으로 그리므로 지우지 않으면 눌리는 링크가 된다."""
+    answer = Answer(
+        text="초기화 코드는 [CNF-40](https://www.google.com/search?q=CNF-40)입니다 [1].",
+        no_answer_reason=NoAnswerReason.NOT_GROUNDED,
+    )
+    client = _client(FakeChatService(answer=answer))
+
+    body = client.post("/chat", json={"question": "초기화 코드는?"}).json()
+
+    assert body["text"] == "초기화 코드는 [CNF-40]입니다 [1]."
+
+
+def test_에이전트_응답에서도_링크_주소를_지운다() -> None:
+    answer = AgentAnswer(text="코드는 [CNF-40](url)입니다.")
+    client = _client(FakeChatService(), agent_service=FakeAgentService(answer))
+
+    body = client.post("/agent", json={"question": "초기화 코드는?"}).json()
+
+    assert body["text"] == "코드는 [CNF-40]입니다."

@@ -230,9 +230,10 @@ def test_도구_결과에서_근거_쪽을_모은다() -> None:
     ]
 
 
-def test_답에_붙은_링크_주소는_지운다() -> None:
+def test_서비스는_모델이_지어낸_링크를_그대로_돌려준다() -> None:
+    # 지우는 곳은 API 응답이다. 평가가 원문을 볼 수 있어야 한다(#71).
     llm = ScriptedLlm([ChatTurn(content="코드는 [CNF-40](url)입니다.", tool_calls=[])])
 
     answer = _service(llm, FakeToolBox()).ask("초기화 코드는?")
 
-    assert answer.text == "코드는 [CNF-40]입니다."
+    assert answer.text == "코드는 [CNF-40](url)입니다."

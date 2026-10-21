@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 
-from techdoc_rag.domain.answer import Answer, Citation, NoAnswerReason, strip_link_targets
+from techdoc_rag.domain.answer import Answer, Citation, NoAnswerReason
 from techdoc_rag.domain.chunk import RetrievedChunk
 from techdoc_rag.domain.ports import DocumentRepository, LlmClient
 from techdoc_rag.query.context_builder import BuiltContext, ContextBuilder
@@ -102,9 +102,7 @@ class ChatService:
         display_names = self._display_names(retrieval.chunks)
         context = self._context_builder.build(retrieval.chunks, display_names)
         prompt = _PROMPT_TEMPLATE.format(context=context.text, question=question)
-        text = strip_link_targets(
-            "".join(self._llm_client.generate(prompt, max_tokens=self._max_answer_tokens))
-        )
+        text = "".join(self._llm_client.generate(prompt, max_tokens=self._max_answer_tokens))
 
         cited = self._cited_numbers(text, context)
 
