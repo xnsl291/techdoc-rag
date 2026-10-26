@@ -9,7 +9,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from techdoc_rag.agent.agent_service import AgentAnswer, AgentService
-from techdoc_rag.domain.answer import Answer
+from techdoc_rag.domain.answer import Answer, strip_link_targets
 
 
 class ChatRequest(BaseModel):
@@ -49,8 +49,10 @@ class ChatResponse(BaseModel):
 
     @classmethod
     def from_answer(cls, answer: Answer) -> ChatResponse:
+        # 링크 주소는 내보낼 때만 지운다. 서비스가 돌려주는 원문에는 남겨서
+        # 평가가 지어낸 링크를 셀 수 있게 한다(#71).
         return cls(
-            text=answer.text,
+            text=strip_link_targets(answer.text),
             citations=[
                 CitationModel(
                     document_id=citation.document_id,
@@ -114,7 +116,7 @@ class AgentResponse(BaseModel):
     @classmethod
     def from_answer(cls, answer: AgentAnswer) -> AgentResponse:
         return cls(
-            text=answer.text,
+            text=strip_link_targets(answer.text),
             steps=[
                 AgentStepModel(
                     tool=step.tool, arguments=step.arguments, result=_clip(step.result)
