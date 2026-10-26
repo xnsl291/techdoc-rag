@@ -7,6 +7,7 @@ LLM·검색은 가짜다. 여기서 검증하는 것은 No-answer 세 갈래 분
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -14,7 +15,7 @@ import pytest
 from techdoc_rag.domain.answer import NoAnswerReason
 from techdoc_rag.domain.chunk import Chunk, RetrievedChunk
 from techdoc_rag.domain.document import Document, DocumentStatus
-from techdoc_rag.domain.errors import GenerationError, RetrievalError
+from techdoc_rag.domain.errors import GenerationError, RetrievalError, UnknownDocumentError
 from techdoc_rag.query.chat_service import ChatService
 from techdoc_rag.query.context_builder import ContextBuilder
 from techdoc_rag.query.retriever import RetrievalResult
@@ -255,3 +256,78 @@ def test_서비스는_모델이_지어낸_링크를_그대로_돌려준다() -> 
 
     assert answer.text == raw
     assert answer.is_answered
+
+
+# --- 문서 범위 지정 (#43) ---
+
+
+class TwoDocumentRepository(FakeRepository):
+    """M100과 G100 두 권. 자동 범위가 지정과 **다른 문서**를 가리키게 하려면 둘이 필요하다."""
+
+    def active_document_ids(self) -> list[str]:
+        return ["ls-m100-v1", "ls-g100-v1"]
+
+    def get(self, document_id: str) -> Document | None:
+        base = super().get("ls-m100-v1")
+        assert base is not None
+        if document_id == "ls-m100-v1":
+            return base
+        if document_id == "ls-g100-v1":
+            return replace(base, document_id="ls-g100-v1", logical_document_id="ls-g100")
+        return None
+
+
+def test_지정한_범위가_자동_범위를_이긴다() -> None:
+    """질문은 G100을 말하는데 범위는 M100으로 줬다. 자동 범위는 G100을 가리킨다.
+
+    지정은 의도이고 자동 범위는 추측이다. 결과는 M100 하나여야 한다.
+    - 지정을 무시하면 G100이 나온다
+    - 합집합이면 둘 다 나와 좁힌 의미가 없다
+    - 교집합이면 0건이 되어 이유도 모른 채 "못 찾음"이 된다
+    """
+    retriever = FakeRetriever(_found(_retrieved("a", 0.9)))
+    service = ChatService(
+        retriever=retriever,
+        context_builder=ContextBuilder(budget_chars=5000),
+        llm_client=FakeLlm("답 [1]."),
+        repository=TwoDocumentRepository(),
+        max_answer_tokens=256,
+    )
+
+    service.ask("G100 정기 점검은 얼마마다 해야 하나요?", document_ids=["ls-m100-v1"])
+
+    assert retriever.scopes == [["ls-m100-v1"]]
+
+
+def test_범위를_안_주면_자동_범위를_쓴다() -> None:
+    """#52의 동작이 그대로여야 한다."""
+    retriever = FakeRetriever(_found(_retrieved("a", 0.9)))
+    service = _service(retriever, FakeLlm("답 [1]."))
+
+    service.ask("M100 정기 점검은 얼마마다 해야 하나요?")
+
+    assert retriever.scopes == [["ls-m100-v1"]]
+
+
+def test_없는_문서를_지정하면_검색하지_않고_예외다() -> None:
+    """조용히 걸러 내면 범위가 0건이 되어 "못 찾음"으로 끝난다. 사용자는
+    매뉴얼에 답이 없다고 오해하는데, 실제로는 ID를 잘못 준 것이다."""
+    retriever = FakeRetriever(_found(_retrieved("a", 0.9)))
+    llm = FakeLlm("호출되면 안 됨")
+    service = _service(retriever, llm)
+
+    with pytest.raises(UnknownDocumentError) as caught:
+        service.ask("질문", document_ids=["ls-m100-v1", "ls-nope-v1"])
+
+    assert caught.value.document_ids == ["ls-nope-v1"]  # 문제인 것만 알려 준다
+    assert retriever.scopes == []
+    assert llm.prompts == []
+
+
+def test_같은_문서를_두_번_줘도_한_번만_넘긴다() -> None:
+    retriever = FakeRetriever(_found(_retrieved("a", 0.9)))
+    service = _service(retriever, FakeLlm("답 [1]."))
+
+    service.ask("질문", document_ids=["ls-m100-v1", "ls-m100-v1"])
+
+    assert retriever.scopes == [["ls-m100-v1"]]

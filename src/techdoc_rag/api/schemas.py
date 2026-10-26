@@ -16,6 +16,15 @@ class ChatRequest(BaseModel):
     # 길이 상한은 라우트에서 settings 값으로 검사한다. Pydantic Field에 박으면
     # 설정 파일이 아니라 코드에 값이 살게 되어 재현성 추적에서 빠진다.
     question: str = Field(min_length=1)
+    # 생략하면 지금처럼 전체를 검색한다(질문에 제품명이 있으면 자동으로 좁힘).
+    # 주면 그 문서 안에서만 찾고, 자동 범위는 쓰지 않는다(#43).
+    #
+    # 빈 목록은 받지 않는다(422). "전부 검색"과 "아무것도 검색 안 함" 중 무엇을
+    # 뜻하는지 정할 수 없다. 전부를 원하면 필드를 빼면 된다.
+    #
+    # 값은 응답 citations의 document_id 형식(`ls-g100-v1`)이다. 화면은 받은
+    # 근거의 ID를 그대로 다음 요청에 돌려주면 된다(이어 묻기).
+    document_ids: list[str] | None = Field(default=None, min_length=1)
 
 
 class CitationModel(BaseModel):

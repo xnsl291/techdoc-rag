@@ -49,7 +49,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from probe_answers import build_services  # noqa: E402
+from probe_answers import build_services, changed_conditions  # noqa: E402
 
 QUESTIONS_PATH = ROOT / "eval" / "questions.csv"
 RESULT_DIR = ROOT / "data" / "evals"
@@ -499,11 +499,7 @@ def compare(left: str, right: str) -> int:
             return json.load(file)
 
     before, after = load(left), load(right)
-    changed = {
-        key: (before["conditions"][key], after["conditions"][key])
-        for key in before["conditions"]
-        if before["conditions"][key] != after["conditions"].get(key)
-    }
+    changed = changed_conditions(before["conditions"], after["conditions"])
     print(f"바뀐 조건: {json.dumps(changed, ensure_ascii=False) if changed else '없음'}")
 
     # 2026-09-22 이전 파일에는 프롬프트도달이 없고, 그때의 검색적중이 지금의
