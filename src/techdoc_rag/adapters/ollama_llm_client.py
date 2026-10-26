@@ -23,6 +23,10 @@ from techdoc_rag.domain.ports import ChatTurn, ToolCall
 
 _GENERATE_PATH = "/api/generate"
 _CHAT_PATH = "/api/chat"
+# truncate=false면 Ollama는 num_ctx를 넘는 프롬프트를 자르지 않고 400으로 거부한다.
+# 기본값(자름)은 맨 앞 4토큰만 남기고 앞쪽을 버려 "근거에 없는 내용은 답하지
+# 마라" 지시문이 사라진다(#57, 2026-10-19 실측). 400은 다른 이유로도 나므로 단정하지 않는다.
+_TOO_LONG_HINT = "프롬프트가 컨텍스트 한도(num_ctx)를 넘었을 수 있음"
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +180,7 @@ class OllamaLlmClient:
                 "tools": tools,
                 "stream": False,
                 "think": self._thinking_enabled,
+                "truncate": False,
                 "options": {
                     "temperature": self._temperature,
                     "num_ctx": self._runtime_context_tokens,
@@ -225,7 +230,8 @@ class OllamaLlmClient:
             raise GenerationError(f"LLM 서버 접속 실패: {self._host}:{self._port} ({exc})") from exc
         if response.status != 200:
             self.close()
-            raise GenerationError(f"도구 호출 실패: HTTP {response.status} {raw[:200]!r}")
+            hint = f" ({_TOO_LONG_HINT})" if response.status == 400 else ""
+            raise GenerationError(f"도구 호출 실패: HTTP {response.status}{hint} {raw[:200]!r}")
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -239,6 +245,7 @@ class OllamaLlmClient:
                 "prompt": prompt,
                 "stream": True,
                 "think": self._thinking_enabled,
+                "truncate": False,
                 "options": {
                     "temperature": self._temperature,
                     "num_ctx": self._runtime_context_tokens,
@@ -261,7 +268,8 @@ class OllamaLlmClient:
         if response.status != 200:
             body = response.read()[:200]
             self.close()
-            raise GenerationError(f"생성 요청 실패: HTTP {response.status} {body!r}")
+            hint = f" ({_TOO_LONG_HINT})" if response.status == 400 else ""
+            raise GenerationError(f"생성 요청 실패: HTTP {response.status}{hint} {body!r}")
         return response
 
     def _drain(self, response: http.client.HTTPResponse) -> None:

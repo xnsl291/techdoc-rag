@@ -36,6 +36,19 @@ class _FakeOllamaHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if behavior == "too_long":
+            # truncate=false일 때 Ollama 0.40.4가 실제로 돌려준 응답(2026-10-20 확인)
+            body = json.dumps(
+                {
+                    "error": "request (8821 tokens) exceeds the available context "
+                    "size (2048 tokens), try increasing it"
+                }
+            ).encode()
+            self.send_response(400)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
 
         # 스트리밍: chunked로 한 줄씩 내보낸다.
         self.send_response(200)
@@ -132,6 +145,8 @@ def test_요청에_옵션과_thinking_설정이_실린다(fake_server) -> None:
     assert request["think"] is False
     assert request["options"]["num_predict"] == 64
     assert request["options"]["num_ctx"] == 8192
+    # 넘치면 앞의 지시문부터 잘리므로 자르지 말고 거부하게 한다(#57)
+    assert request["truncate"] is False
 
 
 def test_thinking_조각은_출력에_섞이지_않는다(fake_server) -> None:
@@ -229,6 +244,24 @@ def test_모델이_없으면_GenerationError(fake_server) -> None:
 
     with pytest.raises(GenerationError, match="HTTP 404"):
         list(client.generate("질문", max_tokens=64))
+
+
+def test_한도를_넘는_프롬프트는_잘리지_않고_GenerationError(fake_server) -> None:
+    fake_server.behavior = "too_long"
+    client = _client(fake_server)
+
+    with pytest.raises(GenerationError, match="컨텍스트 한도"):
+        list(client.generate("긴 질문", max_tokens=64))
+
+
+def test_도구_호출도_자르지_않고_한도_초과를_GenerationError로(fake_server) -> None:
+    fake_server.behavior = "too_long"
+    client = _client(fake_server)
+
+    with pytest.raises(GenerationError, match="컨텍스트 한도"):
+        client.chat([{"role": "user", "content": "긴 질문"}], tools=[], max_tokens=64)
+
+    assert fake_server.requests[-1]["truncate"] is False
 
 
 def test_스트림_중간의_오류_줄은_GenerationError(fake_server) -> None:
